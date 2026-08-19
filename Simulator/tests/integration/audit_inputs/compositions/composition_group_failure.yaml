@@ -1,0 +1,24 @@
+# AUDIT FIXTURE — two simulation groups. The first group's simulation_config
+# (sim_config_missing_resolution.yaml) is deliberately broken, but its two
+# missions (mission_a, mission_b, reused verbatim from
+# tests/integration/test_inputs/) are themselves perfectly valid -- the point
+# is that the whole group fails together regardless of mission validity. The
+# second group (sim_2 + mission_c, also reused verbatim) is a real, working
+# sibling group that must score normally and be entirely unaffected by the
+# first group's failure.
+simulation_compositions:
+  simulations:
+    - simulation_config: "../simulations/sim_config_missing_resolution.yaml"
+      mission_configs:
+        - "../../../integration/test_inputs/missions/mission_a.yaml"
+        - "../../../integration/test_inputs/missions/mission_b.yaml"
+
+    - simulation_config: "../../../integration/test_inputs/simulations/sim_2.yaml"
+      mission_configs:
+        - "../../../integration/test_inputs/missions/mission_c.yaml"
+
+  drone_configs:
+    - "../../../integration/test_inputs/drone_configs/drone_small.yaml"
+
+  lidar_configs:
+    - "../../../integration/test_inputs/lidar_configs/lidar_a.yaml"

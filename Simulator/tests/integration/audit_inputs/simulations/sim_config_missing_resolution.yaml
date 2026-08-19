@@ -1,0 +1,23 @@
+# AUDIT FIXTURE — not part of the submission archive (see tests/audit/README).
+#
+# Deliberately malformed simulation_config: map_resolution_cm is missing
+# entirely. ConfigLoader::parseSimulationConfig() (src/ConfigLoader.cpp) does
+# node["map_resolution_cm"].as<double>() unconditionally; on a missing key
+# that's a Null YAML::Node, and .as<double>() throws
+# YAML::TypedBadConversion<double> (a std::exception). This is the
+# group-level failure case from the assignment's Error Handling Policy:
+# "error in map file that fails on scenarios that run on this map file" --
+# every mission listed under this simulation_config in the composition
+# inherits the failure and gets score -1, regardless of whether those
+# missions are themselves perfectly valid.
+simulation_config:
+  map_filename: "tests/integration/test_inputs/maps/benchmark_map_normalized.npy"
+  initial_drone_position:
+    x_cm: 75
+    y_cm: 155
+    height_cm: 165
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 0

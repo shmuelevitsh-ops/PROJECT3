@@ -1,0 +1,40 @@
+score_report:
+  composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_mixed_success_and_error.yaml
+  generated_at_utc: 2026-08-16T08:28:16Z
+  metric: output_map_accuracy
+  score_range:
+    min: 0
+    max: 100
+  error_score: -1
+  summary:
+    total_runs: 2
+    scored_runs: 1
+    error_runs: 1
+    average_score: 100
+    min_score: 100
+    max_score: 100
+  simulations:
+    - simulation_config: ../simulations/sim_1.yaml
+      missions:
+        - mission_config: ../missions/mission_a.yaml
+          resolution_cm: 10
+          resolution_request_status: ACCEPTED
+          runs:
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 302
+              score: 100
+    - simulation_config: ../simulations/does_not_exist.yaml
+      missions:
+        - mission_config: ../missions/mission_a.yaml
+          resolution_cm: 0
+          resolution_request_status: IGNORED
+          runs:
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: error
+              steps: 0
+              score: -1
+              error_ref:
+                code: SIMULATION_CONFIG_LOAD_FAILED

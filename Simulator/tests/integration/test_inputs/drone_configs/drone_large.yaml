@@ -1,0 +1,11 @@
+drone_config:
+  dimensions_cm: 44       # radius 22cm — fits comfortably in the open first-floor
+                          # room sub-region (Region A), but the nearest wall-voxel
+                          # center on either side of Region D's corridor gap is only
+                          # ~20cm from the gap's centerline, so this radius cannot
+                          # pass through it. A real, physically-grounded entrance
+                          # constraint (not a synthetic gate) — used for natural
+                          # cross-region score variance, not an engineered failure.
+  max_rotate_deg: 45
+  max_advance_cm: 10
+  max_elevate_cm: 10

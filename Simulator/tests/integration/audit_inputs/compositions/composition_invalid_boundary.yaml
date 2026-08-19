@@ -1,0 +1,14 @@
+# AUDIT FIXTURE — reuses the real sim/drone/lidar configs from
+# tests/integration/test_inputs/ so the only deliberately-broken input is
+# mission_invalid_boundary.yaml's MISSION_BOUNDARY_INVALID condition.
+simulation_compositions:
+  simulations:
+    - simulation_config: "../../../integration/test_inputs/simulations/sim_1.yaml"
+      mission_configs:
+        - "../missions/mission_invalid_boundary.yaml"
+
+  drone_configs:
+    - "../../../integration/test_inputs/drone_configs/drone_small.yaml"
+
+  lidar_configs:
+    - "../../../integration/test_inputs/lidar_configs/lidar_a.yaml"

@@ -1,0 +1,6 @@
+drone_config:
+  dimensions_cm: 15      # sphere diameter drone can pass through
+  max_rotate_deg: 45     # max rotation per command
+  max_advance_cm: 50     # max advance distance per command
+  max_elevate_cm: 40     # max elevate distance per command
+

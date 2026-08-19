@@ -1,0 +1,17 @@
+# Real sub-region of the benchmark house's first floor: an open room plus a
+# real partial wall (occupied at x>=90cm, y in [160,170)cm) -- not synthetic
+# geometry, just a small, fast-to-cover slice of the real map data.
+mission_config:
+  max_steps: 2000
+  boundaries:
+    x_boundary:
+      min_cm: 50
+      max_cm: 140
+    y_boundary:
+      min_cm: 130
+      max_cm: 210
+    height_boundary:
+      min_cm: 140
+      max_cm: 200
+  gps_resolution_cm: 10
+  output_mapping_resolution_factor: 1

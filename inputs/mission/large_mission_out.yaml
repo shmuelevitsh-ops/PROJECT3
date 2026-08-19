@@ -1,0 +1,14 @@
+mission_config:
+  max_steps: 10000
+  boundaries:
+    x_boundary:
+      min_cm:  0
+      max_cm:  300
+    y_boundary:
+      min_cm: 0
+      max_cm: 300
+    height_boundary:
+      min_cm: 0
+      max_cm: 300
+  gps_resolution_cm: 5         # GPS expected measurement precision
+

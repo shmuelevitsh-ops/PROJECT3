@@ -1,0 +1,16 @@
+# Full-scale real benchmark house (data_maps/benchmark_map_normalized.npy, via its
+# tests/integration/test_inputs/maps/ copy) -- start zone derived from the map's own
+# geometry (the open 4-voxel-gap yard column). Distinct from sim_1.yaml,
+# sim_2.yaml, and sim_3.yaml, which cover small real sub-regions.
+simulation_config:
+  map_filename: "@TEST_BENCHMARK_MAP_NPY@"
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 145
+    y_cm: 275
+    height_cm: 175
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 0

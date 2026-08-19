@@ -1,0 +1,16 @@
+# Region C: first floor (z=150-200cm) through the real 4x4 shaft into the
+# second floor (z=210-230cm) -- crosses the house's main floor boundary.
+mission_config:
+  max_steps: 2000
+  boundaries:
+    x_boundary:
+      min_cm: 150
+      max_cm: 190
+    y_boundary:
+      min_cm: 50
+      max_cm: 90
+    height_boundary:
+      min_cm: 150
+      max_cm: 230
+  gps_resolution_cm: 10
+  output_mapping_resolution_factor: 1

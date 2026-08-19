@@ -1,0 +1,33 @@
+# AUDIT FIXTURE — one simulation, three missions under it: a real, valid
+# region (mission_a, reused from tests/integration/test_inputs/ verbatim)
+# plus two deliberately-broken missions. Mirrors the assignment spec's own
+# example (PLANNING.md / Assignment 2 doc): a batch with some runs that score
+# normally and some that get isolated as score: -1 / status: "error", with
+# the rest of the batch unaffected.
+#
+# Structurally adapted during Project 3 migration (PROJ2_TESTS_EXECUTION_PLAN.md
+# Phase 6 / PROJ2_TESTS_PLAN.md §5.1): the second bad mission used to be
+# mission_invalid_resolution.yaml (gps_resolution_cm: 0), which never actually
+# reaches Map3DImpl as the map resolution in either project (the simulation's
+# own map resolution is used instead) -- that scenario is not reachable, only
+# ever exercised the same way NonPositiveResolutionIsIsolatedToItsOwnErrorEntry
+# did (not migrated, see §5.1). Replaced here with a reference to a mission
+# file that does not exist, a second genuinely reachable per-run isolation
+# case distinct from mission_invalid_boundary.yaml's MISSION_BOUNDARY_INVALID:
+# ConfigLoader::parseMissionOrPlaceholder() fills a load_error placeholder
+# (MISSION_CONFIG_LOAD_FAILED) instead of throwing, so SimulationManager still
+# isolates this one mission's run to its own error entry without affecting
+# mission_a or mission_invalid_boundary alongside it.
+simulation_compositions:
+  simulations:
+    - simulation_config: "../../../integration/test_inputs/simulations/sim_1.yaml"
+      mission_configs:
+        - "../../../integration/test_inputs/missions/mission_a.yaml"
+        - "../missions/mission_invalid_boundary.yaml"
+        - "../missions/this_mission_config_does_not_exist.yaml"
+
+  drone_configs:
+    - "../../../integration/test_inputs/drone_configs/drone_small.yaml"
+
+  lidar_configs:
+    - "../../../integration/test_inputs/lidar_configs/lidar_a.yaml"

@@ -1,0 +1,104 @@
+score_report:
+  composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_basic.yaml
+  generated_at_utc: 2026-08-16T08:28:13Z
+  metric: output_map_accuracy
+  score_range:
+    min: 0
+    max: 100
+  error_score: -1
+  summary:
+    total_runs: 12
+    scored_runs: 12
+    error_runs: 0
+    average_score: 75.57484567901236
+    min_score: 28.61111111111111
+    max_score: 100
+  simulations:
+    - simulation_config: ../simulations/sim_1.yaml
+      missions:
+        - mission_config: ../missions/mission_a.yaml
+          resolution_cm: 10
+          resolution_request_status: ACCEPTED
+          runs:
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 302
+              score: 100
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 324
+              score: 100
+            - drone_config: ../drone_configs/drone_large.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 63
+              score: 63.19444444444444
+              error_ref:
+                code: UNMAPPABLE_VOXELS_REMAINING
+            - drone_config: ../drone_configs/drone_large.yaml
+              lidar_config: ../lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 40
+              score: 37.03703703703704
+              error_ref:
+                code: UNMAPPABLE_VOXELS_REMAINING
+    - simulation_config: ../simulations/sim_2.yaml
+      missions:
+        - mission_config: ../missions/mission_b.yaml
+          resolution_cm: 10
+          resolution_request_status: ACCEPTED
+          runs:
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 266
+              score: 100
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 348
+              score: 100
+            - drone_config: ../drone_configs/drone_large.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 39
+              score: 48.888888888888886
+              error_ref:
+                code: UNMAPPABLE_VOXELS_REMAINING
+            - drone_config: ../drone_configs/drone_large.yaml
+              lidar_config: ../lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 30
+              score: 28.61111111111111
+              error_ref:
+                code: UNMAPPABLE_VOXELS_REMAINING
+        - mission_config: ../missions/mission_c.yaml
+          resolution_cm: 10
+          resolution_request_status: ACCEPTED
+          runs:
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 202
+              score: 100
+            - drone_config: ../drone_configs/drone_small.yaml
+              lidar_config: ../lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 247
+              score: 100
+            - drone_config: ../drone_configs/drone_large.yaml
+              lidar_config: ../lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 38
+              score: 81.48148148148148
+              error_ref:
+                code: UNMAPPABLE_VOXELS_REMAINING
+            - drone_config: ../drone_configs/drone_large.yaml
+              lidar_config: ../lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 30
+              score: 47.68518518518518
+              error_ref:
+                code: UNMAPPABLE_VOXELS_REMAINING

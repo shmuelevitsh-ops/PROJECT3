@@ -1,0 +1,13 @@
+simulation_config:
+  map_filename: "map/scenario_small.npy"
+  map_resolution_cm: 10   # input file map voxel size (width/height/depth)
+  initial_drone_position:
+    x_cm: 150
+    y_cm: 150
+    height_cm: 110
+  initial_angle_deg: 0    # 0=east, 90=south, 180=west, 270=north
+  map_axes_offset: # Turns (0,0,0)-> (x_offset,y_offset,height_offset)
+    x_offset: 0
+    y_offset: 0
+    height_offset : 0
+

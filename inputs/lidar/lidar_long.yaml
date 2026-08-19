@@ -1,0 +1,5 @@
+lidar_config:
+  z_min_cm: 20                  # minimum operational distance
+  z_max_cm: 150                 # maximum operational distance
+  d_cm: 2.5                     # spacing between beam circles at z_min
+  fov_circles: 3                # number of beam circles (0 to fov_c-1)

@@ -1,0 +1,15 @@
+# Same real sub-region as mission_a.yaml, but with output_mapping_resolution_factor omitted
+# entirely, to exercise ConfigLoader's "field absent" default path end-to-end.
+mission_config:
+  max_steps: 2000
+  boundaries:
+    x_boundary:
+      min_cm: 50
+      max_cm: 140
+    y_boundary:
+      min_cm: 130
+      max_cm: 210
+    height_boundary:
+      min_cm: 140
+      max_cm: 200
+  gps_resolution_cm: 10

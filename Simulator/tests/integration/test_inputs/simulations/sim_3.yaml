@@ -1,0 +1,16 @@
+# Region C: a real 4x4 vertical shaft, confirmed open continuously from the
+# first floor through the floor/ceiling separator's gap into the second
+# floor -- a genuinely multi-level (floor-crossing) sub-region, distinct
+# from sim_1.yaml (Region A) and sim_2.yaml (Region D).
+simulation_config:
+  map_filename: "../maps/benchmark_map_normalized.npy"
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 170
+    y_cm: 70
+    height_cm: 155
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 0

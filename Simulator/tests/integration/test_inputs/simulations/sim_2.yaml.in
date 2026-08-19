@@ -1,0 +1,17 @@
+# Region D: a fully walled second-floor room (real benchmark-house data),
+# reached only through a real 3-wide x 3-tall corridor gap. Start position is
+# in the open hallway just outside the corridor mouth -- a different real
+# sub-region from sim_1.yaml's Region A (first-floor open room), so the
+# composition cross-product exercises genuinely distinct house geometry.
+simulation_config:
+  map_filename: "@TEST_BENCHMARK_MAP_NPY@"
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 180
+    y_cm: 210
+    height_cm: 245
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 0

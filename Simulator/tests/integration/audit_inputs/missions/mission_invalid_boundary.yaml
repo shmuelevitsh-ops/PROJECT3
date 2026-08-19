@@ -1,0 +1,25 @@
+# AUDIT FIXTURE — not part of the submission archive (see tests/audit/README).
+#
+# Deliberately violates Map3DImpl::rejectInvalidBoundaries(): x_boundary's
+# min_cm (140) is NOT smaller than max_cm (50). This is the
+# MISSION_BOUNDARY_INVALID case — caught nowhere upstream (ConfigLoader does
+# no range validation), so it surfaces only when SimulationRunFactoryImpl
+# builds the output map's Map3DImpl, which throws std::invalid_argument:
+# "Map3DImpl: invalid mapping boundaries: min must be smaller than max."
+# That exception is never caught inside SimulationManager::run(), so it
+# propagates all the way to main()'s top-level catch -- an unrecoverable,
+# whole-run-halting error, not a per-run "error" status.
+mission_config:
+  max_steps: 100
+  boundaries:
+    x_boundary:
+      min_cm: 140
+      max_cm: 50
+    y_boundary:
+      min_cm: 130
+      max_cm: 210
+    height_boundary:
+      min_cm: 140
+      max_cm: 200
+  gps_resolution_cm: 10
+  output_mapping_resolution_factor: 1

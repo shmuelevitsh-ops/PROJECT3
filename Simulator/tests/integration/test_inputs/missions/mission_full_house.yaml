@@ -1,0 +1,18 @@
+# Full house extent -- covers the whole benchmark map, not a small sub-region like
+# mission_a/b/c/d.yaml.
+# max_steps is deliberately large (20000): a full real-house sweep+frontier mapping
+# run needs far more steps than any small sub-region mission here.
+mission_config:
+  max_steps: 20000
+  boundaries:
+    x_boundary:
+      min_cm: 0
+      max_cm: 290
+    y_boundary:
+      min_cm: 0
+      max_cm: 300
+    height_boundary:
+      min_cm: 140
+      max_cm: 310
+  gps_resolution_cm: 10
+  output_mapping_resolution_factor: 1
