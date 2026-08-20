@@ -14,21 +14,21 @@ public:
     explicit SimulationManager(
         std::unique_ptr<ISimulationRunFactory> run_factory);
 
-    // Required ISimulation interface.
-    // Synthetic path names are generated because this overload does not
-    // receive the original configuration-file paths.
+    // ISimulation overload: generates synthetic config names because
+    // the interface does not provide the original config file paths.
     [[nodiscard]] types::SimulationManagerReport run(
         const types::SimulationCompositionData& composition,
         const std::filesystem::path& output_path) override;
 
-    // Simulator-specific overload used after parseCompositionData().
-    // Receives the real configuration paths and their optional load errors.
+    // Simulator flow overload: uses the real config paths and load errors
+    // returned by ConfigLoader.
     [[nodiscard]] types::SimulationManagerReport run(
         const types::SimulationCompositionData& composition,
         const std::filesystem::path& output_path,
         const CompositionFilePaths& file_paths);
 
 private:
+    // Shared implementation used by both public run() overloads.
     [[nodiscard]] types::SimulationManagerReport runInternal(
         const types::SimulationCompositionData& composition,
         const std::filesystem::path& output_path,

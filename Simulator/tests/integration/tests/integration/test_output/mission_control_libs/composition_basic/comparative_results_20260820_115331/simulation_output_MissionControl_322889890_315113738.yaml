@@ -1,6 +1,6 @@
 score_report:
   composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_basic.yaml
-  generated_at_utc: 2026-08-16T08:33:52Z
+  generated_at_utc: 2026-08-20T11:53:32Z
   metric: output_map_accuracy
   score_range:
     min: 0

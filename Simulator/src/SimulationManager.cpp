@@ -27,6 +27,7 @@ constexpr double kScoreRangeMin = 0.0;
 constexpr double kScoreRangeMax = 100.0;
 constexpr int kErrorScore = -1;
 
+// Returns the current UTC time in ISO-like format for the final report.
 std::string currentUtcTimestamp() {
     const std::time_t now_time_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm utc_tm{};
@@ -40,11 +41,8 @@ std::string stem(const std::string& path_str) {
     return std::filesystem::path(path_str).stem().string();
 }
 
-// Builds a CompositionFilePaths with the same nested shape as `composition`, using positional
-// placeholder names ("sim_0", "mission_0_1", "drone_0", "lidar_1", ...) instead of real file
-// stems. Used by the 2-arg run() overload, whose callers (e.g. ISimulation-interface callers,
-// or composed in-memory without backing YAML files) have no real config file paths to
-// offer — this still gives every run a distinct, deterministic output directory.
+// Builds placeholder config paths when real file paths are unavailable,
+// so each simulation run can still receive a distinct output directory.
 CompositionFilePaths buildSyntheticFilePaths(const types::SimulationCompositionData& composition) {
 
     CompositionFilePaths file_paths;
@@ -60,7 +58,7 @@ CompositionFilePaths buildSyntheticFilePaths(const types::SimulationCompositionD
         for (std::size_t mission_index = 0;
              mission_index < missions.size();
              ++mission_index) {
-
+            // Generate deterministic placeholder names for each mission in this simulation group.
             mission_refs.push_back(ReferencedConfigFile{
                 "mission_" + std::to_string(sim_index) + "_" +
                     std::to_string(mission_index),
@@ -93,10 +91,8 @@ CompositionFilePaths buildSyntheticFilePaths(const types::SimulationCompositionD
     return file_paths;
 }
 
-// Builds `output_path/simulations/<sim>/<mission>/<drone>__<lidar>` and disambiguates against
-// `used_leaf_dirs` (e.g. the same mission file referenced twice in one composition) by appending
-// "__2", "__3", ... to the leaf component, so no run ever silently overwrites another run's
-// map_output.npy within the same SimulationManager::run() invocation.
+// Builds a unique output directory for one simulation run.
+// If the same directory name was already used, appends "__2", "__3", etc.
 std::filesystem::path uniqueLeafDir(const std::filesystem::path& output_path, const std::string& sim_stem,
                                     const std::string& mission_stem, const std::string& drone_stem,
                                     const std::string& lidar_stem, std::set<std::filesystem::path>& used_leaf_dirs) {
@@ -112,28 +108,15 @@ std::filesystem::path uniqueLeafDir(const std::filesystem::path& output_path, co
     return candidate;
 }
 
+// Builds a readable run identifier for contextual error logging.
 std::string contextLabel(const std::string& sim_stem, const std::string& mission_stem, const std::string& drone_stem,
                          const std::string& lidar_stem) {
     return "sim=" + sim_stem + " mission=" + mission_stem + " drone=" + drone_stem + " lidar=" + lidar_stem;
 }
 
-// Builds the per-run SimulationResult for a run that never actually ran -- either because
-// run_factory_->create()/run->run() threw, or because `simulation`/`mission` was already known
-// unusable before any of that was attempted (ConfigLoader's load_error placeholders). Per the
-// assignment's Error Handling Policy (Assignment 2: "if an error occurs during the run and the
-// simulator can continue to the next scenario, the failed scenario should get the score -1 ...
-// the simulation should continue"), this lets the surrounding loop keep going instead of letting
-// a failure abort the whole composition.
-//
-// output_map_config.resolution is computed via outputMapResolution() (the same formula
-// SimulationRunFactoryImpl::outputMapConfig() uses: simulation.map_resolution) rather than left
-// default-zero, so SimulationOutputWriter's buildMissionNode() -- which reads resolution_cm off
-// whichever run it consumes first for a mission -- reports the resolution this run was actually
-// configured against, not a meaningless 0, when real simulation data was available. For a
-// load_error placeholder simulation (never actually parsed), this naturally evaluates to 0 -- an
-// honest reflection that no real hidden-map resolution was ever known, not a fabricated number.
-// resolution_request_status is left at its default (Ignored): there is no achieved-vs-requested
-// comparison to make when no map was built.
+// Builds a failed SimulationResult so one bad run can be scored -1
+// without aborting the rest of the composition.
+// Preserves available simulation/mission metadata for the final report.
 types::SimulationResult buildErrorResult(const types::SimulationConfigData& simulation,
                                         const common_types::MissionConfigData& mission,
                                         common_types::ErrorRef error) {
@@ -144,7 +127,7 @@ types::SimulationResult buildErrorResult(const types::SimulationConfigData& simu
     result.output_map_config.offset =
         Position3D{mission.mission_bounds.min_x, mission.mission_bounds.min_y, mission.mission_bounds.min_height};
     result.output_map_config.resolution = outputMapResolution(simulation);
-    result.mission_score = -1.0;
+    result.mission_score = kErrorScore;
 
     common_types::MissionRunResult mission_result;
     mission_result.status = common_types::MissionRunStatus::Error;
@@ -154,9 +137,8 @@ types::SimulationResult buildErrorResult(const types::SimulationConfigData& simu
     return result;
 }
 
-// Overload for the run_factory_->create()/run->run() exception path: derives the ErrorRef from
-// the caught exception (the specific code if it's our SimulationException, else a generic
-// fallback for any other std::exception) and forwards to the core overload above.
+// Converts a caught exception into an ErrorRef.
+// Preserves the specific error code for SimulationException.
 types::SimulationResult buildErrorResult(const types::SimulationConfigData& simulation,
                                         const common_types::MissionConfigData& mission,
                                         const std::exception& e) {
@@ -187,12 +169,14 @@ types::SimulationManagerReport SimulationManager::run(const types::SimulationCom
     return runInternal(composition, output_path, file_paths);
 }
 
+// Executes every simulation × mission × drone × lidar combination.
+// Converts run-level failures into -1 results and aggregates all runs into the final report.
 types::SimulationManagerReport SimulationManager::runInternal(const types::SimulationCompositionData& composition,
                                                               const std::filesystem::path& output_path,
                                                               const CompositionFilePaths& file_paths) {
     std::vector<types::SimulationResult> runs;
     std::set<std::filesystem::path> used_leaf_dirs;
-
+    // Create one run for every simulation × mission × drone × lidar combination.
     for (std::size_t sim_index = 0; sim_index < composition.simulation_mission_groups.size(); ++sim_index) {
         const auto& [simulation, missions] = composition.simulation_mission_groups[sim_index];
         const auto& [sim_ref, mission_refs] = file_paths.simulation_mission_paths[sim_index];
@@ -215,12 +199,9 @@ types::SimulationManagerReport SimulationManager::runInternal(const types::Simul
                     const std::filesystem::path leaf_dir =
                         uniqueLeafDir(output_path, sim_stem, mission_stem, drone_stem, lidar_stem, used_leaf_dirs);
                     std::filesystem::create_directories(leaf_dir);
-
+                    // Attach this run's identity to any cerr output produced in this scope.
                     const CerrContextGuard cerr_guard(contextLabel(sim_stem, mission_stem, drone_stem, lidar_stem));
-                    // ConfigLoader already determined this group/mission is unusable (a bad
-                    // simulation_config or mission_config file) -- score -1 without ever calling
-                    // the factory, checking the group-level marker first since it implies every
-                    // mission under it is unusable regardless of that mission's own load_error.
+                    // Skip factory creation when ConfigLoader already marked this config as invalid.
                     if (sim_ref.load_error) {
                         std::cerr << "SimulationManager::run: simulation_config failed to load, scoring -1: "
                             << sim_ref.load_error->message << '\n';
@@ -233,6 +214,7 @@ types::SimulationManagerReport SimulationManager::runInternal(const types::Simul
 
                         runs.push_back(buildErrorResult(simulation, mission, *mission_ref.load_error));
                     } else {
+                        // Build and execute this run; convert any per-run failure into a -1 result.
                         try {
                             std::unique_ptr<ISimulationRun> run =
                                 run_factory_->create(simulation, mission, drone, lidar, leaf_dir);

@@ -1,6 +1,6 @@
 score_report:
-  composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_missing_resolution_factor.yaml
-  generated_at_utc: 2026-08-16T08:33:56Z
+  composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_multilevel.yaml
+  generated_at_utc: 2026-08-20T11:53:33Z
   metric: output_map_accuracy
   score_range:
     min: 0
@@ -14,14 +14,14 @@ score_report:
     min_score: 100
     max_score: 100
   simulations:
-    - simulation_config: ../simulations/sim_1.yaml
+    - simulation_config: ../simulations/sim_3.yaml
       missions:
-        - mission_config: ../missions/mission_a_no_resolution_factor.yaml
+        - mission_config: ../missions/mission_d.yaml
           resolution_cm: 10
           resolution_request_status: ACCEPTED
           runs:
             - drone_config: ../drone_configs/drone_small.yaml
               lidar_config: ../lidar_configs/lidar_a.yaml
               status: completed
-              steps: 302
+              steps: 100
               score: 100

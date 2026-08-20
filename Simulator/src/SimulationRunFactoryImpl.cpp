@@ -7,22 +7,17 @@
 #include <Simulator/SimulationException.h>
 #include <Simulator/SimulationRunImpl.h>
 
-#include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
 
 namespace simulator {
 
-// Resolves the actual resolution output_map is built with: always
-// simulation.map_resolution -- the hidden map's own resolution, and the only
-// value MapsComparison can score the output map against. Whether the
-// mission's requested resolution (gps_resolution * factor) happens to match
-// it (ACCEPTED) or not (IGNORED / IGNORED TOO SMALL) is decided separately
-// by SimulationRunImpl::resolutionRequestStatus(). Declared in
-// SimulationRunFactoryImpl.h and shared with SimulationManager's per-run
-// error path so a run that fails before its output map is built can still
-// report a meaningful resolution_cm.
+// In our implementation, the output map is built with the same resolution
+// as the hidden map: simulation.map_resolution.
+// The mission's requested resolution (gps_resolution * factor) is checked
+// separately by SimulationRunImpl::resolutionRequestStatus(), which decides
+// whether that request is ACCEPTED or IGNORED.
 common::PhysicalLength outputMapResolution(const types::SimulationConfigData& simulation) {
     return simulation.map_resolution;
 }
@@ -31,9 +26,9 @@ namespace {
 
 constexpr const char* kOutputMapFileName = "map_output.npy";
 
-// Builds hidden_map's MapConfig from the loaded array's shape, keeping
-// resolution/offset consistent with `simulation` regardless of whether the
-// shape came from a real load or the load-failure fallback below.
+// Builds hidden_map's MapConfig
+// Combines the NPY shape with the simulation's resolution and offset
+// to build the hidden map's physical bounds.
 common::types::MapConfig hiddenMapConfig(const types::SimulationConfigData& simulation, const NpyArray::shape_t& shape) {
     const double resolution_cm = simulation.map_resolution.force_numerical_value_in(common::cm);
     const double extent_x_voxels = static_cast<double>(shape.size() > 0 ? shape[0] : 1);
@@ -50,26 +45,21 @@ common::types::MapConfig hiddenMapConfig(const types::SimulationConfigData& simu
 }
 
 // Loads the hidden map from simulation.map_filename.
-//
-// On load failure, logs to std::cerr and falls back to an empty/Unmapped
-// array so the run can still complete (scoring 0 against an empty map rather
-// than crashing the composition).
+// If loading fails, throws so SimulationManager can report the run as -1/Error.
 std::unique_ptr<Map3DImpl> loadHiddenMap(const types::SimulationConfigData& simulation) {
     auto array = std::make_shared<NpyArray>();
     const LPCSTR load_error = array->LoadNPY(simulation.map_filename.string());
     if (load_error != nullptr) {
-        std::cerr << "SimulationRunFactoryImpl::create: failed to load hidden map '"
-                  << simulation.map_filename.string() << "': " << load_error << '\n';
-        array = std::make_shared<NpyArray>();
+        throw SimulationException(
+            "MAP_LOAD_FAILED",
+            "SimulationRunFactoryImpl::create: failed to load hidden map '" +
+                simulation.map_filename.string() + "': " + load_error);
     }
     return std::make_unique<Map3DImpl>(array, hiddenMapConfig(simulation, array->Shape()));
 }
 
-// Builds output_map's MapConfig from mission.mission_bounds (offset/boundaries) and
-// simulation.map_resolution (resolution) -- the mapping algorithm must stay unaware of the hidden
-// map's geometry beyond that shared resolution. offset = boundaries.min on every axis guarantees
-// no negative array indices for any in-bounds position, which Map3DImpl's fresh-map allocation
-// requires.
+// Builds the output map from the mission bounds.
+// Its offset is the minimum mission corner.
 common::types::MapConfig outputMapConfig(const types::SimulationConfigData& simulation,
                                          const common::types::MissionConfigData& mission) {
     return common::types::MapConfig{
@@ -87,6 +77,11 @@ SimulationRunFactoryImpl::SimulationRunFactoryImpl(common::MappingAlgorithmFacto
       mission_control_factory_(std::move(mission_control_factory)),
       verbose_(verbose) {}
 
+
+// Builds and connects all runtime components required for one simulation run,
+// then returns a ready-to-run ISimulationRun.
+// Project 3 components such as MappingAlgorithm and MissionControl are created
+// through injected factories, keeping Simulator independent of their implementations.
 std::unique_ptr<ISimulationRun>
 SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
                                  const common::types::MissionConfigData& mission,
@@ -102,16 +97,18 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
         mission.gps_resolution);
     auto movement = std::make_unique<MockMovement>(*gps);
     auto lidar_impl = std::make_unique<MockLidar>(lidar, *hidden_map, *gps);
-
+    
+    // Project 3: create the mapping algorithm through the injected factory,
+    // keeping Simulator independent of the concrete algorithm implementation.
     auto mapping_algorithm = mapping_algorithm_factory_(
         common::MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
 
-    // `output_path` is already this run's dedicated leaf directory (named by the caller --
-    // SimulationManager -- from the simulation/mission/drone/lidar config names), so a fixed
-    // filename is sufficient; uniqueness comes from the directory, not the filename.
+    // Each run has its own output directory, so a fixed map filename is good and unique.
     std::filesystem::create_directories(output_path);
     const std::filesystem::path output_map_file = output_path / kOutputMapFileName;
 
+    // Project 3: create MissionControl through the injected factory,
+    // keeping Simulator independent of the concrete MissionControl implementation.
     auto mission_control = mission_control_factory_(common::MissionControlDependencies{
         mission, drone, *lidar_impl, *gps, *movement, *output_map, *mapping_algorithm, output_map_file, verbose_});
 

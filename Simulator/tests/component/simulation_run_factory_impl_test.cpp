@@ -19,11 +19,14 @@
 // DroneControlImpl/algorithm loop max_steps=0 was chosen to avoid. No assertions changed
 // from the Project 2 original.
 
+#include <Simulator/SimulationException.h>
+#include <Simulator/SimulationManager.h>
 #include <Simulator/SimulationRunFactoryImpl.h>
 
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
 
 using namespace common;
@@ -31,7 +34,15 @@ using namespace common::types;
 using namespace simulator;
 using namespace simulator::types;
 
+#ifndef DATA_MAPS_DIR
+#define DATA_MAPS_DIR "."
+#endif
+
 namespace {
+
+// A real, loadable hidden map (5x5x5 at 10cm resolution) -- used so create()/run() exercise
+// the normal, successful load path rather than the load-failure path covered separately below.
+const std::filesystem::path kValidNpy = std::filesystem::path(DATA_MAPS_DIR) / "single_voxel_x4_y4_z4.npy";
 
 // A trivial no-op IMappingAlgorithm, used only so SimulationRunFactoryImpl::create() has
 // something valid to construct via its injected factory -- it is never actually invoked
@@ -76,9 +87,10 @@ MissionControlFactory savingMissionControlFactory() {
     };
 }
 
-// Minimal-but-valid configs: a nonexistent map_filename takes the documented graceful-fallback
-// path (logs to std::cerr, builds an empty/Unmapped hidden map sized from the still-positive
-// map_resolution -- see SimulationRunFactoryImpl.cpp's loadHiddenMap()). max_steps = 0 means
+// Minimal-but-valid configs: map_filename must point at a real, loadable hidden map --
+// SimulationRunFactoryImpl::create() now throws SimulationException (MAP_LOAD_FAILED) rather than
+// falling back to an empty map when the load fails (see SimulationRunFactoryImpl.cpp's
+// loadHiddenMap()); that failure path is exercised separately below. max_steps = 0 means
 // MissionControlImpl::runMission() never calls into the real DroneControlImpl/MappingAlgorithmImpl
 // at all, so this test exercises exactly what it needs to (create()'s map construction + output
 // path/filename wiring + the unconditional output_map_.save() call) without depending on the real
@@ -92,7 +104,7 @@ MissionControlFactory savingMissionControlFactory() {
 // fixture forced by the new architecture, not a behavioral change to what the test exercises.
 SimulationConfigData minimalSimulationConfig() {
     SimulationConfigData config;
-    config.map_filename = "this/file/does/not/exist.npy";
+    config.map_filename = kValidNpy;
     config.map_resolution = 10.0 * isq::length[cm];
     config.initial_drone_position = Position3D{5.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]};
     config.initial_angle = 0.0 * horizontal_angle[deg];
@@ -167,4 +179,85 @@ TEST(SimulationRunFactoryImpl, CreateDoesNotDisturbAnExistingSiblingRunsOutputIn
     EXPECT_TRUE(std::filesystem::exists(first_dir / "map_output.npy"))
         << "the first run's output must still exist after a second run targets a sibling directory";
     EXPECT_TRUE(std::filesystem::exists(second_dir / "map_output.npy"));
+}
+
+// ── hidden map load failure: create() must fail, not silently substitute an empty map ──────
+
+TEST(SimulationRunFactoryImpl, CreateThrowsMapLoadFailedWhenHiddenMapFileDoesNotExist) {
+    SimulationConfigData simulation = minimalSimulationConfig();
+    simulation.map_filename = "this/file/does/not/exist.npy";
+
+    SimulationRunFactoryImpl factory(noOpMappingAlgorithmFactory(), savingMissionControlFactory(), /*verbose=*/false);
+
+    try {
+        static_cast<void>(factory.create(simulation, minimalMissionConfig(), minimalDroneConfig(),
+                                         minimalLidarConfig(), "out/simulation_run_factory_impl_test/missing_map"));
+        FAIL() << "expected SimulationException for a hidden map that cannot be loaded";
+    } catch (const SimulationException& e) {
+        EXPECT_EQ(e.code(), "MAP_LOAD_FAILED");
+    }
+}
+
+TEST(SimulationRunFactoryImpl, CreateThrowsMapLoadFailedWhenHiddenMapFileIsCorrupt) {
+    const std::filesystem::path corrupt_npy = "out/simulation_run_factory_impl_test/corrupt.npy";
+    std::filesystem::create_directories(corrupt_npy.parent_path());
+    {
+        std::ofstream corrupt_file(corrupt_npy, std::ios::binary);
+        corrupt_file << "not a valid npy file";
+    }
+
+    SimulationConfigData simulation = minimalSimulationConfig();
+    simulation.map_filename = corrupt_npy;
+
+    SimulationRunFactoryImpl factory(noOpMappingAlgorithmFactory(), savingMissionControlFactory(), /*verbose=*/false);
+
+    try {
+        static_cast<void>(factory.create(simulation, minimalMissionConfig(), minimalDroneConfig(),
+                                         minimalLidarConfig(), "out/simulation_run_factory_impl_test/corrupt_map"));
+        FAIL() << "expected SimulationException for a corrupt hidden map file";
+    } catch (const SimulationException& e) {
+        EXPECT_EQ(e.code(), "MAP_LOAD_FAILED");
+    }
+}
+
+// ── same failure through SimulationManager: -1/Error, no run executed, siblings unaffected ──
+
+TEST(SimulationRunFactoryImpl, SimulationManagerScoresMissingHiddenMapNegativeOneAndDoesNotExecuteThatRunWhileSiblingRunsStillSucceed) {
+    const std::filesystem::path output_path = "out/simulation_run_factory_impl_test/manager_missing_map";
+    std::filesystem::remove_all(output_path);
+
+    SimulationConfigData bad_simulation = minimalSimulationConfig();
+    bad_simulation.map_filename = "this/file/does/not/exist.npy";
+
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {
+        {bad_simulation, {minimalMissionConfig()}},
+        {minimalSimulationConfig(), {minimalMissionConfig()}}, // sibling simulation, loadable hidden map
+    };
+    composition.drone_configs = {minimalDroneConfig()};
+    composition.lidar_configs = {minimalLidarConfig()};
+
+    auto factory = std::make_unique<SimulationRunFactoryImpl>(
+        noOpMappingAlgorithmFactory(), savingMissionControlFactory(), /*verbose=*/false);
+    SimulationManager manager(std::move(factory));
+    const SimulationManagerReport report = manager.run(composition, output_path);
+
+    ASSERT_EQ(report.runs.size(), 2u);
+
+    const SimulationResult& failed = report.runs[0];
+    EXPECT_EQ(failed.mission_score, -1.0);
+    ASSERT_EQ(failed.mission_results.size(), 1u);
+    EXPECT_EQ(failed.mission_results[0].status, MissionRunStatus::Error);
+    EXPECT_EQ(failed.mission_results[0].steps, 0u);
+    ASSERT_EQ(failed.mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(failed.mission_results[0].errors[0].code, "MAP_LOAD_FAILED");
+    EXPECT_FALSE(std::filesystem::exists(output_path / "simulations" / "sim_0" / "mission_0_0" / "drone_0__lidar_0" /
+                                         "map_output.npy"))
+        << "SimulationRunImpl::run() must never execute for a combination whose hidden map failed to load";
+
+    const SimulationResult& sibling = report.runs[1];
+    EXPECT_NE(sibling.mission_score, -1.0) << "an independent sibling simulation must still run normally";
+    EXPECT_TRUE(std::filesystem::exists(output_path / "simulations" / "sim_1" / "mission_1_0" / "drone_0__lidar_0" /
+                                        "map_output.npy"))
+        << "the sibling simulation's run must have executed and saved its output map";
 }

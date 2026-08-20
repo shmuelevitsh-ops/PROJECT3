@@ -10,11 +10,12 @@
 
 namespace simulator {
 
-// Resolves the actual resolution with which the output map is built.
-// Shared with SimulationManager's error-result path.
+// The output map uses the hidden map's resolution from the simulation config.
+// SimulationManager also uses this value when reporting a run that failed before the map was built.
 [[nodiscard]] common::PhysicalLength outputMapResolution(
     const types::SimulationConfigData& simulation);
 
+// Builds all runtime dependencies for one simulation/mission/drone/lidar combination.
 class SimulationRunFactoryImpl final : public ISimulationRunFactory {
 public:
     SimulationRunFactoryImpl(common::MappingAlgorithmFactory mapping_algorithm_factory,
