@@ -51,7 +51,7 @@ TEST(Stage1Verify, RunsSingleCombo) {
 
     const std::filesystem::path inputs = TEST_INPUTS_DIR;
     const simulator::types::SimulationConfigData simulation =
-        simulator::parseSimulationConfig(inputs / "simulation/small_simulation_out.yaml");
+        simulator::parseSimulationConfig(inputs / "simulation/small_simulation_out_e2e.yaml");
     const common::types::MissionConfigData mission =
         simulator::parseMissionConfig(inputs / "mission/small_mission_out.yaml");
     const common::types::DroneConfigData drone =

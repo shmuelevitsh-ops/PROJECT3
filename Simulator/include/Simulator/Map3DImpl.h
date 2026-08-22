@@ -12,9 +12,8 @@ namespace simulator {
 class Map3DImpl final : public common::IMutableMap3D {
 public:
     Map3DImpl(std::shared_ptr<NpyArray> map_ptr);
-    Map3DImpl(
-        std::shared_ptr<NpyArray> map_ptr,
-        const common::types::MapConfig map_config);
+    Map3DImpl(std::shared_ptr<NpyArray> map_ptr,
+            const common::types::MapConfig& map_config);
 
     [[nodiscard]] common::types::VoxelOccupancy atVoxel(
         const common::Position3D& pos) const override;
@@ -33,6 +32,7 @@ public:
 private:
     std::shared_ptr<NpyArray> map_;
     common::types::MapConfig config_;
+    mutable bool non_standard_positive_reported_ = false;
 };
 
 } // namespace simulator

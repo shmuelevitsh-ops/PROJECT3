@@ -32,7 +32,9 @@ constexpr int kRawEmpty = 0;
 constexpr int kRawOccupied = 1;
 constexpr int kRawUnmapped = -1;
 
-using VoxelIndex = std::array<long, 3>;
+constexpr std::size_t kNumAxes = 3;
+
+using VoxelIndex = std::array<long, kNumAxes>;
 
 // Converts a world position into voxel indices using the formula:
 //   idx = floor((world_coordinate - offset) / resolution)
@@ -56,26 +58,23 @@ using VoxelIndex = std::array<long, 3>;
     };
 }
 
-// True iff `pos` lies within `bounds` on every axis, using half-open
-// intervals (min <= coordinate < max). This is the configured-boundaries
-// check used by isInBounds()/atVoxel()/set() — distinct from, and checked
-// before, the defensive NpyArray-index validity check in flatIndex().
+// Checks whether `pos` is inside the configured map bounds using
+// half-open intervals (min <= coordinate < max).
+// NpyArray index validity is checked separately by flatIndex().
 [[nodiscard]] bool isWithinBoundaries(const Position3D& pos, const types::MappingBounds& bounds) {
     return pos.x >= bounds.min_x && pos.x < bounds.max_x &&
            pos.y >= bounds.min_y && pos.y < bounds.max_y &&
            pos.z >= bounds.min_height && pos.z < bounds.max_height;
 }
 
-// Converts voxel indices into a flat, row-major offset into the NpyArray data
-// (matching the [X, Y, Z] shape used by the map files). Returns std::nullopt
-// if the index falls outside the array - the caller must treat this as
-// OutOfBounds *before* touching the array data.
+// Converts [X, Y, Z] voxel indices to a flat NpyArray index.
+// Returns std::nullopt if the indices are outside the actual array shape.
 [[nodiscard]] std::optional<std::size_t> flatIndex(const VoxelIndex& index,
                                                      const NpyArray::shape_t& shape) {
-    if (shape.size() != 3) {
+    if (shape.size() != kNumAxes) {
         return std::nullopt;
     }
-    for (std::size_t axis = 0; axis < 3; ++axis) {
+    for (std::size_t axis = 0; axis < kNumAxes; ++axis) {
         if (index[axis] < 0 || static_cast<std::size_t>(index[axis]) >= shape[axis]) {
             return std::nullopt;
         }
@@ -86,11 +85,8 @@ using VoxelIndex = std::array<long, 3>;
     return x * shape[1] * shape[2] + y * shape[2] + z;
 }
 
-// Reads the raw integer stored at a flat index. Supports signed int (our own
-// output maps, so Unmapped can be represented as -1) plus the dtypes a hidden
-// map loaded from disk may legitimately arrive in per the assignment's
-// forum clarification (values are guaranteed to be only 0/1 -- Empty/
-// Occupied -- for these): uint8, int8, and 4-byte unsigned int.
+// Reads a voxel value from any supported NpyArray dtype.
+// The value is normalized to long before converting it to VoxelOccupancy.
 [[nodiscard]] long readRaw(const NpyArray& array, std::size_t flat) {
     if (array.ValueType() == typeid(int)) {
         return static_cast<long>(array.Data<int>()[flat]);
@@ -108,11 +104,9 @@ using VoxelIndex = std::array<long, 3>;
     return kRawUnmapped;
 }
 
-// Maps a raw stored integer to the corresponding VoxelOccupancy.
-// Note: -2 is the OutOfBounds sentinel returned by atVoxel() itself and
-// should never appear as a stored value. If it (or any other unexpected
-// value) does appear in the array, it must not be silently treated as
-// Unmapped without logging.
+// Converts a stored raw value to VoxelOccupancy.
+// OutOfBounds is never stored in the array.
+// Positive values greater than 1 are Occupied; invalid negatives are rejected.
 [[nodiscard]] types::VoxelOccupancy rawToOccupancy(long raw) {
     switch (raw) {
         case kRawPotentiallyOccupied:
@@ -124,14 +118,17 @@ using VoxelIndex = std::array<long, 3>;
         case kRawUnmapped:
             return types::VoxelOccupancy::Unmapped;
         default:
-            std::cerr << "Map3DImpl: unexpected stored voxel value " << raw
-                      << "; treating as Unmapped.\n";
-            return types::VoxelOccupancy::Unmapped;
-    }
+            if (raw > kRawOccupied) {
+                return types::VoxelOccupancy::Occupied;
+            }
+
+            throw SimulationException(
+                "INVALID_MAP_FORMAT",
+                "Map3DImpl: invalid negative voxel value.");
+            }
 }
 
-// Writes a VoxelOccupancy value to the backing array, honoring the dtype of
-// the array (see readRaw for why two dtypes are supported).
+// Converts VoxelOccupancy to its raw representation and writes it to the NpyArray.
 void writeRaw(NpyArray& array, std::size_t flat, types::VoxelOccupancy value) {
     int raw = kRawUnmapped;
     switch (value) {
@@ -176,18 +173,8 @@ void writeRaw(NpyArray& array, std::size_t flat, types::VoxelOccupancy value) {
     return static_cast<std::size_t>(std::ceil(span_cm / resolution_cm));
 }
 
-// Allocates a fresh, owned NpyArray sized from config.boundaries,
-// config.offset, and config.resolution, initialized to Unmapped. Used for
-// maps constructed with an empty NpyArray (e.g. a new output map).
-//
-// Sized from offset, not from the boundary minimum: array index 0
-// corresponds to world position `offset` (per computeIndex()'s
-// floor((pos - offset) / resolution) formula), so the array must span
-// [offset, boundaries.max) on every axis — not just [boundaries.min,
-// boundaries.max) — for every position inside the configured boundaries to
-// be indexable without being clamped away by clampBoundariesToExtent()
-// afterward. (rejectBoundariesStartingBeforeOffset() already guarantees
-// offset <= boundaries.min, so this never shrinks the configured span.)
+// Creates the backing NpyArray for a new map using the configured size and resolution.
+// All voxels are initialized to Unmapped.
 void allocateFreshMap(std::shared_ptr<NpyArray>& map_ptr, const types::MapConfig& config) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
 
@@ -209,11 +196,10 @@ void allocateFreshMap(std::shared_ptr<NpyArray>& map_ptr, const types::MapConfig
     std::fill_n(map_ptr->Data<int>(), map_ptr->NumValue(), kRawUnmapped);
 }
 
-// Validates an NpyArray loaded from disk (e.g. a hidden map). Throws
-// std::invalid_argument if it cannot be interpreted as a [X, Y, Z] occupancy
-// grid.
+// Validates the shape, memory layout and dtype of an NpyArray loaded from disk.
+// Throws INVALID_MAP_FORMAT if the array is not supported.
 void validateLoadedArray(const NpyArray& array) {
-    if (array.Shape().size() != 3) {
+    if (array.Shape().size() != kNumAxes) {
         throw SimulationException("INVALID_MAP_FORMAT", "Map3DImpl requires a 3D NpyArray with shape [X, Y, Z].");
     }
     if (array.ColMajor()) {
@@ -226,15 +212,11 @@ void validateLoadedArray(const NpyArray& array) {
     }
 }
 
-// Resolution used by the single-argument constructor's inferred default
-// MapConfig (see inferDefaultConfig()).
+// Default resolution used when inferring MapConfig from an NpyArray.
 constexpr double kDefaultResolutionCm = 1.0;
 
-// Infers a usable default MapConfig (resolution=1cm, offset=0, boundaries
-// matching the array shape at 1cm resolution) from a non-empty, valid 3D
-// NpyArray. Used by the single-argument constructor when no MapConfig is
-// supplied. Throws std::invalid_argument if map_ptr is null or the array is
-// empty, since no shape is available to infer geometry from in either case.
+// Fallback for construction without an explicit MapConfig:
+// infers the config from the NpyArray, assuming 1cm resolution and zero offset.
 [[nodiscard]] types::MapConfig inferDefaultConfig(const std::shared_ptr<NpyArray>& map_ptr) {
     if (!map_ptr) {
         throw std::invalid_argument("Map3DImpl requires a valid map pointer.");
@@ -262,11 +244,8 @@ constexpr double kDefaultResolutionCm = 1.0;
         resolution};
 }
 
-// Throws std::invalid_argument if config.boundaries has min >= max on any
-// axis. This is the *pre-clamp* invalid-configuration case: a genuinely
-// malformed config, distinct from the post-clamp disjoint-boundaries case
-// in rejectDisjointBoundaries() (where valid boundaries simply don't
-// overlap the array's physical extent).
+// Rejects bounds where min >= max on any axis.
+// This check runs before any clamping to the map extent.
 void rejectInvalidBoundaries(const types::MappingBounds& bounds) {
     if (bounds.min_x < bounds.max_x && bounds.min_y < bounds.max_y &&
         bounds.min_height < bounds.max_height) {
@@ -276,12 +255,8 @@ void rejectInvalidBoundaries(const types::MappingBounds& bounds) {
                               "Map3DImpl: invalid mapping boundaries: min must be smaller than max.");
 }
 
-// Throws std::invalid_argument if any configured boundary minimum maps to a
-// negative index under the configured offset and resolution, i.e. the
-// configured boundaries start before the map's offset on some axis. Uses
-// the same index formula as computeIndex(): floor((min - offset) / resolution).
-// Only relevant for fresh-map allocation from an empty NpyArray — config_
-// here is otherwise known to have a positive resolution by this point.
+// Rejects fresh-map configs whose boundaries start before the map offset,
+// since those positions would map to negative voxel indices.
 void rejectBoundariesStartingBeforeOffset(const types::MapConfig& config) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
 
@@ -302,32 +277,31 @@ void rejectBoundariesStartingBeforeOffset(const types::MapConfig& config) {
                               "Map3DImpl: configured boundaries start before the map offset.");
 }
 
-// Clamps a single axis of config.boundaries to [extent_min_cm, extent_max_cm]
-// (the physical extent of the backing array on that axis) and logs if any
-// clamping occurred, per the Boundary Validation Policy.
-void clampAxis(double& min_cm, double& max_cm, double extent_min_cm, double extent_max_cm,
+// Clamps one configured boundary axis to the physical range covered by the NpyArray.
+// Logs if the configured bounds had to be adjusted.
+void clampAxis(double& configured_min_cm, double& configured_max_cm, double map_min_cm, double map_max_cm,
                const char* axis_name) {
-    const double original_min = min_cm;
-    const double original_max = max_cm;
+    const double original_min = configured_min_cm;
+    const double original_max = configured_max_cm;
 
-    if (min_cm < extent_min_cm) {
-        min_cm = extent_min_cm;
+    if (configured_min_cm < map_min_cm) {
+        configured_min_cm = map_min_cm;
     }
-    if (max_cm > extent_max_cm) {
-        max_cm = extent_max_cm;
+    if (configured_max_cm > map_max_cm) {
+        configured_max_cm = map_max_cm;
     }
 
-    if (min_cm != original_min || max_cm != original_max) {
+    if (configured_min_cm != original_min || configured_max_cm != original_max) {
         std::cerr << "Map3DImpl: clamped " << axis_name << " mapping boundary from ["
-                  << original_min << ", " << original_max << "] cm to [" << min_cm << ", "
-                  << max_cm << "] cm to fit the map extent.\n";
+                  << original_min << ", " << original_max << "] cm to [" << configured_min_cm << ", "
+                  << configured_max_cm << "] cm to fit the map extent.\n";
     }
 }
 
 // Clamps config.boundaries so that every position within them maps to a
 // valid index into `shape`. No-op if the map has no usable resolution.
 void clampBoundariesToExtent(types::MapConfig& config, const NpyArray::shape_t& shape) {
-    if (shape.size() != 3) {
+    if (shape.size() != kNumAxes) {
         return;
     }
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
@@ -362,11 +336,8 @@ void clampBoundariesToExtent(types::MapConfig& config, const NpyArray::shape_t& 
     config.boundaries.max_height = max_z_cm * z_extent[cm];
 }
 
-// Throws std::invalid_argument if config.boundaries are degenerate (min >=
-// max) on any axis after clampBoundariesToExtent() — i.e. no valid voxels
-// remain. Logs the degenerate axis/axes to std::cerr before throwing.
-// No-op if the map has no usable resolution (the disjoint check is
-// meaningless without one).
+// Rejects bounds that have no valid range left after clamping to the map extent.
+// Logs the affected axes before throwing MISSION_BOUNDARY_INVALID.
 void rejectDisjointBoundaries(const types::MapConfig& config) {
     if (!(config.resolution.force_numerical_value_in(cm) > 0.0)) {
         return;
@@ -403,14 +374,13 @@ void rejectDisjointBoundaries(const types::MapConfig& config) {
 
 } // namespace
 
+
+// map_ptr is intentionally not moved here because inferDefaultConfig()
+// must still read it before delegating to the main constructor.
 Map3DImpl::Map3DImpl(std::shared_ptr<NpyArray> map_ptr)
-    // Note: map_ptr is intentionally copied (not moved) into the delegated
-    // constructor's argument — inferDefaultConfig() reads map_ptr's shape and
-    // must observe it unmoved; argument evaluation order is otherwise
-    // unspecified, so a std::move(map_ptr) here would be unsafe.
     : Map3DImpl(map_ptr, inferDefaultConfig(map_ptr)) {}
 
-Map3DImpl::Map3DImpl(std::shared_ptr<NpyArray> map_ptr, const types::MapConfig map_config)
+Map3DImpl::Map3DImpl(std::shared_ptr<NpyArray> map_ptr, const types::MapConfig& map_config)
     : map_(std::move(map_ptr)),
       config_(map_config) {
     if (!map_) {
@@ -446,12 +416,21 @@ types::VoxelOccupancy Map3DImpl::atVoxel(const Position3D& pos) const {
 
     const auto flat = flatIndex(*index, map_->Shape());
     if (!flat) {
-        // Defensive: pos is within the configured boundaries but the backing
-        // NpyArray does not have a voxel there (e.g. a misconfigured map).
+        // Defensive: configured bounds may still disagree with the actual array shape.
         return types::VoxelOccupancy::OutOfBounds;
     }
 
-    return rawToOccupancy(readRaw(*map_, *flat));
+    const long raw = readRaw(*map_, *flat);
+
+    if (raw > kRawOccupied && !non_standard_positive_reported_) {
+        std::cerr
+            << "Map3DImpl: non-standard positive voxel value encountered; "
+            "values greater than 1 are treated as Occupied.\n";
+
+        non_standard_positive_reported_ = true;
+    }
+
+    return rawToOccupancy(raw);
 }
 
 types::MapConfig Map3DImpl::getMapConfig() const {
@@ -474,8 +453,7 @@ void Map3DImpl::set(const Position3D& pos, types::VoxelOccupancy value) {
 
     const auto flat = flatIndex(*index, map_->Shape());
     if (!flat) {
-        // Defensive: pos is within the configured boundaries but the backing
-        // NpyArray does not have a voxel there (e.g. a misconfigured map).
+        // Defensive: configured bounds may still disagree with the actual array shape.
         return;
     }
 

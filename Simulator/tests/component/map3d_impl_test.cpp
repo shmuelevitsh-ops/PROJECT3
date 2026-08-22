@@ -204,16 +204,45 @@ TEST(Map3DImpl, StoredValueOneIsOccupied) {
     EXPECT_EQ(map.atVoxel(pos(0.0, 0.0, 0.0)), VoxelOccupancy::Occupied);
 }
 
+TEST(Map3DImpl, StoredPositiveValueGreaterThanOneIsOccupied) {
+    Map3DImpl map{makeIntArray({1, 1, 1}, 45), fileMapConfig()};
+
+    EXPECT_EQ(
+        map.atVoxel(pos(0.0, 0.0, 0.0)),
+        VoxelOccupancy::Occupied);
+}
+
+TEST(Map3DImpl, NonStandardPositiveValueIsLoggedOnlyOncePerMap) {
+    Map3DImpl map{makeIntArray({1, 1, 1}, 45), fileMapConfig()};
+
+    std::ostringstream captured_cerr;
+    std::streambuf* original_cerr = std::cerr.rdbuf(captured_cerr.rdbuf());
+
+    EXPECT_EQ(map.atVoxel(pos(0.0, 0.0, 0.0)), VoxelOccupancy::Occupied);
+    EXPECT_EQ(map.atVoxel(pos(0.0, 0.0, 0.0)), VoxelOccupancy::Occupied);
+
+    std::cerr.rdbuf(original_cerr);
+
+    const std::string output = captured_cerr.str();
+    const std::string warning = "non-standard positive voxel value";
+
+    const std::size_t first = output.find(warning);
+    ASSERT_NE(first, std::string::npos);
+    EXPECT_EQ(output.find(warning, first + 1), std::string::npos);
+}
+
 TEST(Map3DImpl, StoredValueMinusOneIsUnmapped) {
     Map3DImpl map{makeIntArray({1, 1, 1}, -1), fileMapConfig()};
     EXPECT_EQ(map.atVoxel(pos(0.0, 0.0, 0.0)), VoxelOccupancy::Unmapped);
 }
 
-TEST(Map3DImpl, StoredValueMinusTwoIsTreatedAsUnmapped) {
-    // -2 should never be stored, but if it is, it must be logged and treated
-    // as Unmapped (not silently ignored, and not OutOfBounds).
+TEST(Map3DImpl, StoredInvalidNegativeValueThrows) {
+    // Negative stored values other than the supported occupancy values are invalid.
     Map3DImpl map{makeIntArray({1, 1, 1}, -2), fileMapConfig()};
-    EXPECT_EQ(map.atVoxel(pos(0.0, 0.0, 0.0)), VoxelOccupancy::Unmapped);
+
+    EXPECT_THROW(
+        static_cast<void>(map.atVoxel(pos(0.0, 0.0, 0.0))),
+        std::invalid_argument);
 }
 
 TEST(Map3DImpl, OutOfRangeIndexIsOutOfBoundsNotUnmapped) {
