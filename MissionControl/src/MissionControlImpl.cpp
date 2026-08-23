@@ -51,11 +51,11 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
             break;
         }
 
-        // DroneStepStatus::Error — terminal for this mission run.
+        // DroneStepStatus::Error — non-terminal at MissionControl level: log it, record it, and
+        // keep going. The mission only ends in Error via other paths (e.g. an unhandled
+        // exception); a returned Error alone must still resolve to Completed or MaxSteps.
         std::cerr << "MissionControlImpl::runMission: drone control error: " << result.message << '\n';
-        status = common_types::MissionRunStatus::Error;
         errors.push_back(common_types::ErrorRef{"DRONE_CONTROL_ERROR", result.message});
-        break;
     }
 
     output_map_.save(output_map_file_);

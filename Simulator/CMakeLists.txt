@@ -26,6 +26,7 @@ add_executable(simulator_322889890_315113738
 target_include_directories(simulator_322889890_315113738 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/common_simulator/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(simulator_322889890_315113738 PRIVATE
@@ -96,6 +97,7 @@ add_executable(simulator_registration_test
 target_include_directories(simulator_registration_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/common_simulator/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(simulator_registration_test PRIVATE
@@ -156,6 +158,7 @@ target_include_directories(simulator_component_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/common_simulator/include
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/component
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(simulator_component_test PRIVATE
@@ -216,6 +219,7 @@ target_include_directories(simulator_integration_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../MissionControl/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../MissionControl/common_mission_control/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../Algorithm/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(simulator_integration_test PRIVATE

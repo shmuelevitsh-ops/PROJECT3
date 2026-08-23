@@ -19,6 +19,7 @@
 #include <Simulator/Map3DImpl.h>
 #include <Simulator/MockGPS.h>
 #include <Simulator/MockMovement.h>
+#include <Simulator/SimulationException.h>
 #include <Simulator/SimulationRunFactoryImpl.h>
 #include <Simulator/SimulationRunImpl.h>
 
@@ -191,8 +192,12 @@ std::unique_ptr<SimulationRunImpl> makeSimulationRun(const MapConfig& hidden_con
 
 class SimulationRun : public ::testing::Test {
 protected:
+    // A fresh 20-voxel-per-axis (200cm), 10cm-resolution hidden map, defaulting to Unmapped
+    // everywhere -- never Occupied, so it never blocks the plain (non-collision) movement tests
+    // below. Individual collision tests mark specific voxels Occupied via hidden_map_->set(...).
+    std::unique_ptr<Map3DImpl> hidden_map_ = freshMap(gridConfig(20, 10.0));
     MockGPS gps_{origin(), headingDeg(0.0, 0.0), 10.0 * isq::length[cm]};
-    MockMovement movement_{gps_};
+    MockMovement movement_{gps_, *hidden_map_, droneConfig().radius};
 };
 
 // ── MockGPS ──────────────────────────────────────────────────────────────────
@@ -285,6 +290,114 @@ TEST_F(SimulationRun, ElevateNegativeDecreasesAltitude) {
 
     EXPECT_TRUE(result);
     EXPECT_EQ(gps_.position().z, 30.0 * z_extent[cm]);
+}
+
+// ── MockMovement collision detection (hidden-map wall checks) ───────────────
+
+// Regression test for a lower-bound enumeration bug: sphereHitsWall() derived its minimum
+// candidate voxel index as floor((center - radius) / resolution), which rounds *up* to the wrong
+// voxel whenever (center - radius) lands exactly on a resolution boundary, silently skipping the
+// voxel immediately below that boundary. Here the Occupied voxel spans x=[60,70), the drone
+// center sits at x=75 with a 5cm radius, so center-radius=70 exactly -- the sphere's surface
+// touches the voxel's far (x=70) face exactly, which sphereIntersectsAxisAlignedBox's closed
+// (<=) comparison defines as intersecting. Uses a zero-distance advance() so the exact drone
+// center is checked directly, isolating the point check from path sampling.
+TEST_F(SimulationRun, AdvanceDetectsSphereExactlyTouchingVoxelFarFaceAtResolutionBoundary) {
+    hidden_map_->set(Position3D{65.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+    gps_.setPosition(Position3D{75.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]});
+    ASSERT_EQ(droneConfig().radius, 5.0 * isq::length[cm]);
+
+    EXPECT_THROW(movement_.advance(0.0 * cm), SimulationException);
+}
+
+TEST_F(SimulationRun, AdvanceIntoOccupiedDestinationThrowsMovementCollision) {
+    // Destination of advance(25cm) from the origin, heading 0deg (+x), is (25,0,0) -- inside
+    // voxel (2,0,0) on this 10cm grid. Marking that voxel Occupied must block the move.
+    hidden_map_->set(Position3D{25.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+
+    try {
+        movement_.advance(25.0 * cm);
+        FAIL() << "expected a SimulationException(\"MOVEMENT_COLLISION\")";
+    } catch (const SimulationException& e) {
+        EXPECT_EQ(e.code(), "MOVEMENT_COLLISION");
+    }
+}
+
+TEST_F(SimulationRun, WallOnlyInMiddleOfPathWithClearDestinationStillThrows) {
+    // Destination (50,0,0) is left entirely clear (Unmapped); the wall sits only at x=25, well
+    // inside the advance(50cm) path from the origin. The 0.1*resolution=1cm path sampling must
+    // catch it even though the final destination itself is safe.
+    hidden_map_->set(Position3D{25.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+
+    EXPECT_THROW(movement_.advance(50.0 * cm), SimulationException);
+}
+
+TEST_F(SimulationRun, CenterlineClearButDroneRadiusOverlapsOccupiedVoxelThrows) {
+    // The straight-line centerline (y=5,z=5) never itself enters an Occupied voxel, but a 6cm
+    // drone radius reaches 1cm past the centerline's own voxel boundary into a neighboring
+    // Occupied voxel offset in y -- collision must be detected from that sphere-vs-AABB radius
+    // overlap, not only from whichever voxel each sampled point's own center falls inside.
+    gps_.setPosition(Position3D{5.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]});
+    hidden_map_->set(Position3D{15.0 * x_extent[cm], 15.0 * y_extent[cm], 5.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+    MockMovement wide_movement(gps_, *hidden_map_, 6.0 * cm);
+
+    EXPECT_THROW(wide_movement.advance(15.0 * cm), SimulationException);
+}
+
+TEST_F(SimulationRun, ClearAdvanceSucceedsAndReachesExactDestination) {
+    const MovementResult result = movement_.advance(30.0 * cm);
+
+    EXPECT_TRUE(result);
+    EXPECT_NEAR(gps_.position().x.force_numerical_value_in(cm), 30.0, kEpsilon);
+    EXPECT_NEAR(gps_.position().y.force_numerical_value_in(cm), 0.0, kEpsilon);
+    EXPECT_NEAR(gps_.position().z.force_numerical_value_in(cm), 0.0, kEpsilon);
+}
+
+TEST_F(SimulationRun, CollisionLeavesGpsPositionUnchanged) {
+    const Position3D before = gps_.position();
+    hidden_map_->set(Position3D{25.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+
+    EXPECT_THROW(movement_.advance(25.0 * cm), SimulationException);
+
+    EXPECT_EQ(gps_.position().x, before.x);
+    EXPECT_EQ(gps_.position().y, before.y);
+    EXPECT_EQ(gps_.position().z, before.z);
+}
+
+TEST_F(SimulationRun, ElevateIntoOccupiedDestinationThrowsMovementCollisionAndLeavesGpsUnchanged) {
+    const Position3D before = gps_.position();
+    hidden_map_->set(Position3D{5.0 * x_extent[cm], 5.0 * y_extent[cm], 25.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+
+    try {
+        movement_.elevate(25.0 * cm);
+        FAIL() << "expected a SimulationException(\"MOVEMENT_COLLISION\")";
+    } catch (const SimulationException& e) {
+        EXPECT_EQ(e.code(), "MOVEMENT_COLLISION");
+    }
+
+    EXPECT_EQ(gps_.position().x, before.x);
+    EXPECT_EQ(gps_.position().y, before.y);
+    EXPECT_EQ(gps_.position().z, before.z);
+}
+
+TEST_F(SimulationRun, NonMultipleOfSamplingStepDistanceStillChecksExactDestination) {
+    // advance(24.3cm) is not a whole multiple of the 1cm (0.1*resolution) sampling step: the
+    // regular samples land at x=0,1,...,24 (all >=6cm from the wall's near face at x=30), and
+    // only the true fractional destination x=24.3 (5.7cm from x=30) is within this movement's
+    // 5.8cm drone radius. A path check that skips the exact destination would miss this
+    // collision entirely.
+    hidden_map_->set(Position3D{35.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]},
+                     VoxelOccupancy::Occupied);
+    gps_.setPosition(Position3D{0.0 * x_extent[cm], 5.0 * y_extent[cm], 5.0 * z_extent[cm]});
+    MockMovement precise_movement(gps_, *hidden_map_, 5.8 * cm);
+
+    EXPECT_THROW(precise_movement.advance(24.3 * cm), SimulationException);
 }
 
 // ── SimulationRunImpl::run() ─────────────────────────────────────────────────

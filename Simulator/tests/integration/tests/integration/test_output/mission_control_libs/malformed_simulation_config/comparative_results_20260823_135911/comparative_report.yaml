@@ -1,0 +1,10 @@
+comparative_report:
+  composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_malformed_simulation_config.yaml
+  mission_control_folder: tests/integration/test_output/mission_control_libs/malformed_simulation_config
+  generated_at_utc: 2026-08-23T13:59:11Z
+  results_summary:
+    - same_results:
+        - MissionControl_322889890_315113738.so
+      total_score: 0
+      total_steps: 0
+  errors: ~

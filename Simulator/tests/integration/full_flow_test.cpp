@@ -80,6 +80,7 @@
 #include <Simulator/MockGPS.h>
 #include <Simulator/MockLidar.h>
 #include <Simulator/MockMovement.h>
+#include <Simulator/SimulationRunImpl.h>
 
 #include "mocks/GMockIMappingAlgorithm.h"
 
@@ -601,7 +602,7 @@ TEST(Integration, ScriptedMockAlgorithmRealHappyPathWritesMapAndScoresNonZero) {
     // for movement.
     MockGPS gps(Position3D{75.0 * x_extent[cm], 185.0 * y_extent[cm], 215.0 * z_extent[cm]},
                 Orientation{0.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, mission.gps_resolution);
-    MockMovement movement(gps);
+    MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
 
     ::testing::NiceMock<test::GMockIMappingAlgorithm> algorithm(
@@ -693,6 +694,84 @@ TEST(Integration, ScriptedMockAlgorithmRealHappyPathWritesMapAndScoresNonZero) {
     ASSERT_EQ(scores.size(), 1u);
     EXPECT_GT(scores[0], 0.0) << "a real scan against real wall/floor data should score above zero, even"
                                   " though only a small fraction of the closet was explored";
+}
+
+// Mandatory wall-collision scenario: a deliberately faulty algorithm commands a movement that
+// collides with a real wall in the hidden map. MockMovement -- the one component allowed to see
+// the hidden map, since it may be running another team's faulty Algorithm.so -- must
+// independently detect the collision and throw. Per Optional Common-Issues row 9, a
+// DroneStepStatus::Error returned from drone_control_.step() is non-terminal at MissionControl
+// level: it is logged/recorded and the mission loop continues, so the failure must flow all the
+// way out through DroneControlImpl/MissionControlImpl/SimulationRunImpl as a normal
+// (non-crashing), non-terminal error result rather than aborting the run.
+//
+// Reuses Region B's real geometry from ScriptedMockAlgorithmRealHappyPathWritesMapAndScoresNonZero
+// above: the closet interior is one voxel wide in x (index 7, world x=[70,80)); the nearest real
+// Occupied wall voxel is at index 6 (world x=[60,70), center 65cm), confirmed exactly 10cm from
+// the interior center used as the start position. The faulty algorithm here simply commands one
+// Advance(10cm) with the drone already facing that wall (heading 180deg, -x) -- exactly the kind
+// of movement a real (buggy) mapping algorithm could return -- and is then scripted to finish the
+// mission on its next call, so the run continues past the logged collision to Completed.
+TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallLogsErrorAndMissionContinuesToCompleted) {
+    const std::shared_ptr<NpyArray> benchmark_array = loadBenchmarkMap();
+    auto hidden_map = std::make_unique<Map3DImpl>(benchmark_array, benchmarkHiddenMapConfig(benchmark_array->Shape()));
+
+    const MissionConfigData mission = regionBMissionConfig(); // x:[70,80) y:[180,200) z:[210,310) cm
+    auto output_map = std::make_unique<Map3DImpl>(std::make_shared<NpyArray>(), benchmarkOutputMapConfig(mission));
+
+    const DroneConfigData drone = droneConfigWithRadius(4.0);
+    const LidarConfigData lidar = benchmarkLidarConfig(20.0);
+
+    // Start at the closet's interior center (75,185,215)cm, facing -x (180deg) -- straight at the
+    // real wall centered at x=65cm, exactly one 10cm resolution step away.
+    auto gps = std::make_unique<MockGPS>(
+        Position3D{75.0 * x_extent[cm], 185.0 * y_extent[cm], 215.0 * z_extent[cm]},
+        Orientation{180.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, mission.gps_resolution);
+    auto movement = std::make_unique<MockMovement>(*gps, *hidden_map, drone.radius);
+    auto lidar_impl = std::make_unique<MockLidar>(lidar, *hidden_map, *gps);
+
+    auto algorithm = std::make_unique<::testing::NiceMock<test::GMockIMappingAlgorithm>>(
+        MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
+    MovementCommand faulty_advance;
+    faulty_advance.type = MovementCommandType::Advance;
+    faulty_advance.distance = 10.0 * isq::length[cm];
+    EXPECT_CALL(*algorithm, nextStep(::testing::_, ::testing::IsNull()))
+        .WillOnce(::testing::Return(
+            MappingStepCommand{faulty_advance, std::nullopt, AlgorithmStatus::Working}))
+        .WillOnce(::testing::Return(
+            MappingStepCommand{std::nullopt, std::nullopt, AlgorithmStatus::Finished}));
+
+    const std::filesystem::path output_dir = scratchDir() / "faulty_algorithm_wall_collision";
+    std::filesystem::create_directories(output_dir);
+    const std::filesystem::path output_file = output_dir / "map_output.npy";
+    auto mission_control = std::make_unique<MissionControlImpl>(MissionControlDependencies{
+        mission, drone, *lidar_impl, *gps, *movement, *output_map, *algorithm, output_file});
+
+    simulator::types::SimulationConfigData simulation_config;
+    simulation_config.map_resolution = 10.0 * isq::length[cm];
+    simulation_config.initial_drone_position = Position3D{};
+    simulation_config.initial_angle = 0.0 * horizontal_angle[deg];
+
+    SimulationRunImpl run(std::move(hidden_map), std::move(output_map), std::move(gps), std::move(movement),
+                         std::move(lidar_impl), std::move(algorithm), std::move(mission_control),
+                         simulation_config, mission, output_file);
+
+    simulator::types::SimulationResult result;
+    ASSERT_NO_THROW(result = run.run()) << "a movement collision must surface as a normal error "
+                                            "result, never as an uncaught exception / crash";
+
+    // Recoverable per row 9: the collision is logged but does not abort the run, so the normal
+    // (non -1.0) scoring path runs once the mission finishes.
+    EXPECT_GE(result.mission_score, 0.0);
+
+    ASSERT_EQ(result.mission_results.size(), 1u);
+    EXPECT_EQ(result.mission_results[0].status, MissionRunStatus::Completed);
+    EXPECT_EQ(result.mission_results[0].steps, 2u);
+    ASSERT_EQ(result.mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(result.mission_results[0].errors[0].code, "DRONE_CONTROL_ERROR");
+    EXPECT_NE(result.mission_results[0].errors[0].message.find("MOVEMENT_COLLISION"), std::string::npos)
+        << "collision-specific information must survive into the reported error message, got: "
+        << result.mission_results[0].errors[0].message;
 }
 
 // Spawns the real simulator_322889890_315113738 binary against a real composition

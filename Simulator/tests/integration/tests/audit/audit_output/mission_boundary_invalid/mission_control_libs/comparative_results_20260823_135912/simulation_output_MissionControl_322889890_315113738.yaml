@@ -1,0 +1,29 @@
+score_report:
+  composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/audit_inputs/compositions/composition_invalid_boundary.yaml
+  generated_at_utc: 2026-08-23T13:59:13Z
+  metric: output_map_accuracy
+  score_range:
+    min: 0
+    max: 100
+  error_score: -1
+  summary:
+    total_runs: 1
+    scored_runs: 0
+    error_runs: 1
+    average_score: -1
+    min_score: -1
+    max_score: -1
+  simulations:
+    - simulation_config: ../../../integration/test_inputs/simulations/sim_1.yaml
+      missions:
+        - mission_config: ../missions/mission_invalid_boundary.yaml
+          resolution_cm: 10
+          resolution_request_status: IGNORED
+          runs:
+            - drone_config: ../../../integration/test_inputs/drone_configs/drone_small.yaml
+              lidar_config: ../../../integration/test_inputs/lidar_configs/lidar_a.yaml
+              status: error
+              steps: 0
+              score: -1
+              error_ref:
+                code: MISSION_BOUNDARY_INVALID

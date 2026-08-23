@@ -38,6 +38,7 @@ using namespace common::types;
 using namespace MissionControl_322889890_315113738;
 using ::testing::_;
 using ::testing::Eq;
+using ::testing::Invoke;
 using ::testing::NiceMock;
 using ::testing::Return;
 
@@ -102,6 +103,34 @@ MappingStepCommand advanceCommand() {
     return command;
 }
 
+// Generous, effectively unbounded map used as the fixture's default MapConfig. Without it, an
+// unstubbed output_map_.getMapConfig() would return a default-constructed MapConfig (all-zero
+// boundaries), which DroneControlImpl's out-of-bounds handling would treat as "already at the
+// boundary" -- silently dropping every Advance/Elevate command in advanceCommand() below before
+// it ever reaches the scripted movement_ mock. Tests here only script IDroneMovement outcomes;
+// none of them mean to exercise out-of-bounds handling itself, so the bounds just need to be wide
+// enough to never bind.
+MapConfig unboundedMapConfig() {
+    MapConfig config;
+    config.boundaries = MappingBounds{
+        -100000.0 * x_extent[cm], 100000.0 * x_extent[cm], -100000.0 * y_extent[cm],
+        100000.0 * y_extent[cm], -100000.0 * z_extent[cm], 100000.0 * z_extent[cm]};
+    return config;
+}
+
+// A real (half-open) bounds check against `bounds`, used as the test double's isInBounds()
+// behavior -- DroneControlImpl treats output_map_.isInBounds() as the sole authority on
+// legality, so an unstubbed default (NiceMock returns false) would make it treat every
+// Advance/Elevate as out of bounds. Captures `bounds` by value rather than calling back into
+// output_map_.getMapConfig(), so it never perturbs a test's own call-count expectations on that
+// method.
+[[nodiscard]] auto isInBoundsFor(const MappingBounds& bounds) {
+    return [bounds](const Position3D& pos) {
+        return pos.x >= bounds.min_x && pos.x < bounds.max_x && pos.y >= bounds.min_y &&
+               pos.y < bounds.max_y && pos.z >= bounds.min_height && pos.z < bounds.max_height;
+    };
+}
+
 class MissionControl : public ::testing::Test {
 protected:
     NiceMock<test::GMockILidar> lidar_;
@@ -110,6 +139,11 @@ protected:
     NiceMock<test::GMockIMutableMap3D> output_map_;
     NiceMock<test::GMockIMappingAlgorithm> algorithm_{
         MappingAlgorithmDependencies{missionConfig(1), lidarConfig(), droneConfig(), output_map_}};
+
+    void SetUp() override {
+        ON_CALL(output_map_, getMapConfig()).WillByDefault(Return(unboundedMapConfig()));
+        ON_CALL(output_map_, isInBounds(_)).WillByDefault(Invoke(isInBoundsFor(unboundedMapConfig().boundaries)));
+    }
 
     std::unique_ptr<MissionControlImpl> makeMissionControl(std::size_t max_steps,
                                                            const std::filesystem::path& output_map_file = "out.npy") {
@@ -143,16 +177,92 @@ TEST_F(MissionControl, MaxStepsReachedWithoutTerminalStatusReportsMaxSteps) {
     EXPECT_EQ(result.steps, kMaxSteps);
 }
 
-TEST_F(MissionControl, ErrorStatusStopsLoopAndReportsErrorWithDetails) {
-    EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(advanceCommand()));
+TEST_F(MissionControl, ErrorStatusIsLoggedAndMissionContinuesToCompleted) {
+    // Row 9 (Optional Common-Issues): a returned DroneStepStatus::Error is non-terminal at
+    // MissionControl level -- it is logged/recorded, but the mission loop keeps going and a
+    // later Completed still resolves the run as Completed.
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(finishedCommand()));
     EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
 
-    EXPECT_EQ(result.status, MissionRunStatus::Error);
+    EXPECT_EQ(result.status, MissionRunStatus::Completed);
+    EXPECT_EQ(result.steps, 2u);
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors[0].code, "DRONE_CONTROL_ERROR");
+    EXPECT_EQ(result.errors[0].message, "blocked by obstacle");
+}
+
+TEST_F(MissionControl, ErrorThenContinueThenCompletedRunsAllThreeSteps) {
+    // Confirms MissionControl genuinely resumes the loop after an Error -- not just that it
+    // tolerates one immediately followed by a terminal Completed.
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(workingCommand()))
+        .WillOnce(Return(finishedCommand()));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+
+    const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
+    const MissionRunResult result = mission_control->runMission();
+
+    EXPECT_EQ(result.status, MissionRunStatus::Completed);
+    EXPECT_EQ(result.steps, 3u);
     ASSERT_EQ(result.errors.size(), 1u);
     EXPECT_EQ(result.errors[0].message, "blocked by obstacle");
+}
+
+TEST_F(MissionControl, MultipleErrorsAreAllRetainedInOrderBeforeCompleted) {
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(finishedCommand()));
+    EXPECT_CALL(movement_, advance(_))
+        .WillOnce(Return(MovementResult{false, "first obstacle"}))
+        .WillOnce(Return(MovementResult{false, "second obstacle"}));
+
+    const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
+    const MissionRunResult result = mission_control->runMission();
+
+    EXPECT_EQ(result.status, MissionRunStatus::Completed);
+    EXPECT_EQ(result.steps, 3u);
+    ASSERT_EQ(result.errors.size(), 2u);
+    EXPECT_EQ(result.errors[0].message, "first obstacle");
+    EXPECT_EQ(result.errors[1].message, "second obstacle");
+}
+
+TEST_F(MissionControl, ErrorsUntilMaxStepsReportsMaxStepsNotError) {
+    // Every attempted step returns Error, and the budget runs out without a Completed: the
+    // final status must be MaxSteps (never Error), with one step() call per max_steps and every
+    // error retained.
+    constexpr std::size_t kMaxSteps = 3;
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(kMaxSteps).WillRepeatedly(Return(advanceCommand()));
+    EXPECT_CALL(movement_, advance(_)).Times(kMaxSteps).WillRepeatedly(Return(MovementResult{false, "blocked"}));
+
+    const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(kMaxSteps);
+    const MissionRunResult result = mission_control->runMission();
+
+    EXPECT_EQ(result.status, MissionRunStatus::MaxSteps);
+    EXPECT_EQ(result.steps, kMaxSteps);
+    ASSERT_EQ(result.errors.size(), kMaxSteps);
+}
+
+TEST_F(MissionControl, ErrorOnFinalAvailableStepReportsMaxStepsAndRetainsError) {
+    constexpr std::size_t kMaxSteps = 2;
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(workingCommand()))
+        .WillOnce(Return(advanceCommand()));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked at the end"}));
+
+    const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(kMaxSteps);
+    const MissionRunResult result = mission_control->runMission();
+
+    EXPECT_EQ(result.status, MissionRunStatus::MaxSteps);
+    EXPECT_EQ(result.steps, kMaxSteps);
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors[0].message, "blocked at the end");
 }
 
 TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenCompleted) {
@@ -163,8 +273,11 @@ TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenCompleted) {
     (void)mission_control->runMission();
 }
 
-TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenError) {
-    EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(advanceCommand()));
+TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenErrorOccursThenCompletes) {
+    // A recoverable DroneStepStatus::Error must not disturb the normal final output handling.
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(finishedCommand()));
     EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
     EXPECT_CALL(output_map_, save(_)).Times(1);
 
@@ -246,17 +359,19 @@ TEST_F(MissionControl, OutputMapIsSavedToTheExactConstructorProvidedPath) {
 }
 
 TEST_F(MissionControl, ErrorStatusReportsStepCountAndDroneControlErrorCode) {
-    // ErrorStatusStopsLoopAndReportsErrorWithDetails checks only the error message; the
+    // ErrorStatusIsLoggedAndMissionContinuesToCompleted checks only the error message; the
     // "DRONE_CONTROL_ERROR" code and the steps count (++steps happens before the status check, so
-    // an immediate Error must still report steps == 1, not 0) are separate output-contract details
-    // that a bug could get wrong independently of the message.
-    EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(advanceCommand()));
+    // an immediate Error must still report steps == 1 for that attempt, not 0) are separate
+    // output-contract details that a bug could get wrong independently of the message.
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(finishedCommand()));
     EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
 
-    EXPECT_EQ(result.steps, 1u);
+    EXPECT_EQ(result.steps, 2u);
     ASSERT_EQ(result.errors.size(), 1u);
     EXPECT_EQ(result.errors[0].code, "DRONE_CONTROL_ERROR");
 }

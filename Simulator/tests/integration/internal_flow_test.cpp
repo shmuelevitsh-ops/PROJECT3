@@ -35,6 +35,7 @@
 #include <Simulator/MockMovement.h>
 #include <Simulator/SimulationRunFactoryImpl.h>
 
+#include "mocks/GMockILidar.h"
 #include "mocks/GMockIMappingAlgorithm.h"
 
 #include <gmock/gmock.h>
@@ -197,7 +198,7 @@ std::unique_ptr<Map3DImpl> runTwoRoomMission(long opening_w, long opening_h, dou
     // Start in the middle of Room A (x in [1, wall_x - 1]).
     const Position3D start_position = voxelCenter(kRoomNx / 4, kRoomNy / 2, kRoomNz / 2);
     MockGPS gps(start_position, Orientation{}, mission.gps_resolution);
-    MockMovement movement(gps);
+    MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
 
@@ -280,18 +281,36 @@ common::MissionControlFactory realMissionControlFactory() {
 
 // ── 4x4 — the house's main entrance ──────────────────────────────────────────
 
-// Radii below are chosen against voxel-CENTER distances, not continuous wall
-// surface distance: the safety sphere check rejects a candidate the moment
-// any *voxel center* within its radius is Occupied, and voxel centers are
-// spaced a full resolution_cm (10cm) apart. For an opening of width W
-// voxels, the nearest blocking wall-voxel center sits roughly
-// ceil((W + 1) / 2) * resolution_cm from the opening's center — noticeably
-// farther than "half the opening's physical width" would suggest. The first
-// version of these tests used the latter (wrong) intuition and two
-// "oversized" cases incorrectly fit through.
+// Radii below are chosen against the true continuous safety sphere -- a
+// sphere-vs-voxel-volume (closest-point-on-AABB) test against the wall's real
+// surface, not voxel-CENTER distance. Movement is still grid-aligned (the
+// drone can only occupy one resolution_cm=10cm-wide cell at a time), so for an
+// opening of width W voxels the *best available* cell is the one closest to
+// the opening's true center, whose distance to the nearest wall's near
+// surface is: W/2 * resolution_cm for odd W (an exactly-centered cell exists);
+// (W-1)/2 * resolution_cm for even W (no exactly-centered cell -- the best
+// available one is off-center by half a voxel). That distance is this
+// scenario's maximum radius that can still pass through *at all* (and a
+// sphere merely touching, at exactly that distance, still counts as a
+// collision -- see UserCommon::sphereIntersectsAxisAlignedBox); each "fits"
+// test below picks a radius comfortably under that maximum, and each
+// "oversized" test picks one comfortably over it.
+//
+// An earlier version of these tests picked radii against voxel-CENTER
+// distance instead (roughly ceil((W + 1) / 2) * resolution_cm from the
+// opening's center) -- a materially looser bound that was only ever correct
+// for the algorithm's old, buggy safety check. Two "fits" cases (4x4/15cm,
+// 2x2/8cm) picked radii between the true continuous-surface maximum and that
+// looser voxel-center one; correcting the safety geometry to the true
+// continuous sphere (this task's whole point) makes those two specific radii
+// genuinely too large to fit through their openings, so both are lowered here
+// to genuinely-fitting values. No opening size, "oversized" radius, or any
+// other scenario in this file changed.
 
 TEST(Internal, FourByFourEntranceFittingDroneReachesSecondRoom) {
-    expectFittingDroneReachesRoomB(4, 4, 15.0);
+    // True maximum: (4-1)/2 * 10cm = 15cm (a sphere touching it is itself
+    // rejected). 13cm leaves a comfortable margin.
+    expectFittingDroneReachesRoomB(4, 4, 13.0);
 }
 
 TEST(Internal, FourByFourEntranceOversizedDroneCannotReachSecondRoom) {
@@ -301,6 +320,10 @@ TEST(Internal, FourByFourEntranceOversizedDroneCannotReachSecondRoom) {
 // ── 3x3 — one of the second-floor rooms ──────────────────────────────────────
 
 TEST(Internal, ThreeByThreeEntranceFittingDroneReachesSecondRoom) {
+    // True maximum: 3/2 * 10cm = 15cm (odd width -- an exactly-centered cell
+    // exists). 12cm already leaves a comfortable margin under the true
+    // continuous-surface maximum, not just the old voxel-center one, so this
+    // radius did not need to change.
     expectFittingDroneReachesRoomB(3, 3, 12.0);
 }
 
@@ -311,7 +334,11 @@ TEST(Internal, ThreeByThreeEntranceOversizedDroneCannotReachSecondRoom) {
 // ── 2x2 — the other second-floor room ────────────────────────────────────────
 
 TEST(Internal, TwoByTwoEntranceFittingDroneReachesSecondRoom) {
-    expectFittingDroneReachesRoomB(2, 2, 8.0);
+    // True maximum: (2-1)/2 * 10cm = 5cm (even width -- no exactly-centered
+    // cell; the best available one is off-center by half a voxel). 4cm
+    // leaves a 1cm margin -- the same radius already used and verified below
+    // for the similarly 2-voxel-wide TwoByOne opening.
+    expectFittingDroneReachesRoomB(2, 2, 4.0);
 }
 
 TEST(Internal, TwoByTwoEntranceOversizedDroneCannotReachSecondRoom) {
@@ -391,7 +418,7 @@ TEST(Internal, MockAlgorithmAlwaysHoveringHitsMaxSteps) {
     mission.max_steps = 50;
 
     MockGPS gps(voxelCenter(2, 2, 2), Orientation{}, mission.gps_resolution);
-    MockMovement movement(gps);
+    MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
 
     ::testing::NiceMock<test::GMockIMappingAlgorithm> algorithm(
@@ -407,4 +434,76 @@ TEST(Internal, MockAlgorithmAlwaysHoveringHitsMaxSteps) {
 
     EXPECT_EQ(result.status, MissionRunStatus::MaxSteps);
     EXPECT_EQ(result.steps, mission.max_steps);
+}
+
+// Regression for a DroneControlImpl/MockMovement direction-math inconsistency (Optional
+// Common-Issues row 12): DroneControlImpl used to predict an Advance's expected post-movement
+// position by zeroing a negligible cos/sin residue at an axis-aligned heading (e.g.
+// cos(90deg) ~ 6.12e-17), while the real MockMovement::advance() applied that same heading's raw,
+// un-zeroed cos/sin -- a real, if tiny, position disagreement between prediction and actual
+// movement that had nothing to do with GPS being wrong. At a large enough distance that
+// disagreement (~6e-8cm here, at distance=1e9cm) exceeds row 12's strict machine-epsilon
+// tolerance, so with the old, inconsistent math this perfectly legitimate Advance would have been
+// wrongly reported as Error. Both sides now share
+// user_common_322889890_315113738::advanceDirection(), so they can never disagree -- this uses
+// the real MockMovement + MockGPS (not a mocked IDroneMovement) so that agreement is actually
+// exercised, not merely assumed.
+//
+// Talks to DroneControlImpl directly (not through MissionControlImpl) so a mismatch surfaces as
+// this step's own DroneStepStatus::Error instead of being swallowed by MissionControl's row-9
+// log-and-continue handling. The hidden/output map bounds are huge purely to give the drone room
+// to travel this far; its resolution is scaled to match so MockMovement's collision-path sampling
+// stays cheap (tens of samples, not tens of millions), and every voxel stays Unmapped (never
+// Occupied), so no collision is ever possible along the path.
+TEST(Internal, RealMockMovementAdvanceAtOrthogonalHeadingAgreesWithDroneControlExpectedPosition) {
+    const MappingBounds huge_bounds{
+        0.0 * x_extent[cm], 2.0e9 * x_extent[cm], 0.0 * y_extent[cm], 2.0e9 * y_extent[cm],
+        0.0 * z_extent[cm], 2.0e9 * z_extent[cm]};
+    const MapConfig huge_map_config{huge_bounds, Position3D{}, 2.0e8 * isq::length[cm]};
+
+    auto hidden_map = std::make_unique<Map3DImpl>(std::make_shared<NpyArray>(), huge_map_config);
+    auto output_map = std::make_unique<Map3DImpl>(std::make_shared<NpyArray>(), huge_map_config);
+
+    DroneConfigData drone;
+    drone.radius = 5.0 * isq::length[cm];
+    drone.max_rotate = 90.0 * horizontal_angle[deg];
+    drone.max_advance = 1.0e10 * isq::length[cm]; // large enough this Advance is never split
+    drone.max_elevate = 1.0e10 * isq::length[cm];
+
+    LidarConfigData lidar;
+    lidar.z_min = 5.0 * isq::length[cm];
+    lidar.z_max = 50.0 * isq::length[cm];
+    lidar.d = 2.5 * isq::length[cm];
+    lidar.fov_circles = 2;
+
+    MissionConfigData mission;
+    mission.max_steps = 10;
+    mission.gps_resolution = 10.0 * isq::length[cm];
+    mission.output_mapping_resolution_factor = 1.0;
+
+    const Position3D start_position{
+        1.0e5 * x_extent[cm], 1.0e5 * y_extent[cm], 1.0e5 * z_extent[cm]};
+    const Orientation orthogonal_heading{90.0 * horizontal_angle[deg], AltitudeAngle{}};
+    MockGPS gps(start_position, orthogonal_heading, mission.gps_resolution);
+    MockMovement movement(gps, *hidden_map, drone.radius);
+
+    ::testing::NiceMock<test::GMockILidar> lidar_mock;
+    EXPECT_CALL(lidar_mock, scan(::testing::_)).Times(0);
+
+    MappingStepCommand advance_command;
+    advance_command.movement = MovementCommand{};
+    advance_command.movement->type = MovementCommandType::Advance;
+    advance_command.movement->distance = 1.0e9 * isq::length[cm];
+    // No scan_orientation: this test is purely about position agreement, not scanning.
+
+    ::testing::NiceMock<test::GMockIMappingAlgorithm> algorithm(
+        MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
+    EXPECT_CALL(algorithm, nextStep(::testing::_, ::testing::_))
+        .WillOnce(::testing::Return(advance_command));
+
+    DroneControlImpl control(drone, mission, lidar_mock, gps, movement, *output_map, algorithm);
+
+    const DroneStepResult result = control.step();
+
+    EXPECT_EQ(result.status, DroneStepStatus::Continue) << "message: " << result.message;
 }

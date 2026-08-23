@@ -11,6 +11,7 @@ set_target_properties(MissionControl_322889890_315113738 PROPERTIES
 target_include_directories(MissionControl_322889890_315113738 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/common_mission_control/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(MissionControl_322889890_315113738 PRIVATE
@@ -45,6 +46,7 @@ target_include_directories(mission_control_component_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/common_mission_control/include
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/component
     ${CMAKE_CURRENT_SOURCE_DIR}/../Simulator/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(mission_control_component_test PRIVATE

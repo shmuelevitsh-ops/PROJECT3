@@ -8,6 +8,7 @@ set_target_properties(Algorithm_322889890_315113738 PROPERTIES
 
 target_include_directories(Algorithm_322889890_315113738 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(Algorithm_322889890_315113738 PRIVATE
@@ -37,6 +38,7 @@ target_include_directories(algorithm_component_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/component
     ${CMAKE_CURRENT_SOURCE_DIR}/../Simulator/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../UserCommon/include
 )
 
 target_link_libraries(algorithm_component_test PRIVATE

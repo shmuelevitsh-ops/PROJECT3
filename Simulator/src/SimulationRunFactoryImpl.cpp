@@ -95,7 +95,7 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
         simulation.initial_drone_position,
         common::Orientation{simulation.initial_angle, 0.0 * common::altitude_angle[common::deg]},
         mission.gps_resolution);
-    auto movement = std::make_unique<MockMovement>(*gps);
+    auto movement = std::make_unique<MockMovement>(*gps, *hidden_map, drone.radius);
     auto lidar_impl = std::make_unique<MockLidar>(lidar, *hidden_map, *gps);
     
     // Project 3: create the mapping algorithm through the injected factory,
