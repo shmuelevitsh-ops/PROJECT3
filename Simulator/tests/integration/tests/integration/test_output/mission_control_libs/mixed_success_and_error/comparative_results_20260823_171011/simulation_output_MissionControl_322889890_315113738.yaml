@@ -1,6 +1,6 @@
 score_report:
   composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_mixed_success_and_error.yaml
-  generated_at_utc: 2026-08-23T13:59:11Z
+  generated_at_utc: 2026-08-23T17:10:12Z
   metric: output_map_accuracy
   score_range:
     min: 0

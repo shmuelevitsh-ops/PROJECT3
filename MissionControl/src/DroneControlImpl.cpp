@@ -9,6 +9,7 @@
 #include <exception>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,65 @@ namespace {
 constexpr int kMaxBoundaryNudges = 64;
 
 [[nodiscard]] double numCm(common::PhysicalLength v) { return v.force_numerical_value_in(cm); }
+
+// Total number of times mapping_algorithm_.nextStep() is called, within a single call to
+// prepareNextSequence(), before giving up on a faulty Algorithm (Optional Common-Issues rows 3
+// and 4: an invalid-value command and a faulty Working NOOP share this one budget -- three
+// rejected attempts of either kind, in any mix, exhausts it).
+constexpr int kMaxAlgorithmAttempts = 3;
+
+// Total number of times lidar_.scan() is attempted, for one requested scan, before giving up on a
+// faulty LiDAR (Optional Common-Issues row 6: "The LiDAR returns an empty vector"). Only the scan
+// itself is retried -- never the Algorithm call or the movement that may have preceded it.
+constexpr int kMaxLidarScanAttempts = 3;
+
+// Total number of times the same already-prepared movement chunk (post row-10 amendment, post
+// row-8 splitting) is dispatched to movement_, before giving up on a faulty movement driver
+// (Optional Common-Issues row 7: "The movement driver returns false"). Only a MovementResult with
+// success=false is retried this way -- a thrown exception (e.g. a real wall collision MockMovement
+// alone can detect) is a distinct, non-retried failure mode, unchanged from before this row
+// existed.
+constexpr int kMaxMovementAttempts = 3;
+
+// Row 3 ("A faulty algorithm returned a command with invalid values"): only non-finite ACTIVE
+// numeric fields are rejected. Negative/zero/oversized-but-finite values, unused MovementCommand
+// fields, and enum values are all left for other rows (8, 10) or are simply not this row's
+// concern.
+[[nodiscard]] bool isMovementCommandValid(const common_types::MovementCommand& movement) {
+    switch (movement.type) {
+        case common_types::MovementCommandType::Hover:
+            return true;
+        case common_types::MovementCommandType::Rotate:
+            return std::isfinite(movement.angle.force_numerical_value_in(deg));
+        case common_types::MovementCommandType::Advance:
+        case common_types::MovementCommandType::Elevate:
+            return std::isfinite(movement.distance.force_numerical_value_in(cm));
+    }
+    return true;
+}
+
+[[nodiscard]] bool isScanOrientationValid(const Orientation& orientation) {
+    return std::isfinite(orientation.horizontal.force_numerical_value_in(deg)) &&
+           std::isfinite(orientation.altitude.force_numerical_value_in(deg));
+}
+
+[[nodiscard]] bool isAlgorithmCommandValid(const common_types::MappingStepCommand& command) {
+    if (command.movement.has_value() && !isMovementCommandValid(*command.movement)) {
+        return false;
+    }
+    if (command.scan_orientation.has_value() && !isScanOrientationValid(*command.scan_orientation)) {
+        return false;
+    }
+    return true;
+}
+
+// Row 4 ("The algorithm returned a NOOP"): only a Working status with neither movement nor scan
+// is a faulty NOOP. Finished/FinishedWithUnmappableVoxels with no movement/scan are legitimate
+// terminal results and must not be rejected here.
+[[nodiscard]] bool isFaultyNoop(const common_types::MappingStepCommand& command) {
+    return command.status == common_types::AlgorithmStatus::Working &&
+           !command.movement.has_value() && !command.scan_orientation.has_value();
+}
 
 // The (dx, dy, dz), in cm, that `movement` would apply from `state` if run at full requested
 // distance. Only Advance (x/y, via current heading) and Elevate (z) change position; the caller
@@ -285,8 +345,25 @@ DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
     const common_types::DroneState state{gps_position, gps_.heading(), step_index_};
     const common_types::LidarScanResult* latest_scan_ptr =
         latest_scan_ ? &(*latest_scan_) : nullptr;
-    const common_types::MappingStepCommand command =
-        mapping_algorithm_.nextStep(state, latest_scan_ptr);
+
+    // Optional Common-Issues rows 3 & 4: retry the same request (same DroneState/step_index, same
+    // latest_scan) against a faulty Algorithm that returns invalid values or a Working NOOP.
+    // Rejected attempts perform no movement/scan/map write and consume no separate step() --
+    // everything here happens before this step's movement/scan dispatch below.
+    common_types::MappingStepCommand command;
+    bool accepted = false;
+    for (int attempt = 0; attempt < kMaxAlgorithmAttempts; ++attempt) {
+        command = mapping_algorithm_.nextStep(state, latest_scan_ptr);
+        if (isAlgorithmCommandValid(command) && !isFaultyNoop(command)) {
+            accepted = true;
+            break;
+        }
+    }
+    if (!accepted) {
+        throw std::runtime_error(
+            "DroneControlImpl::prepareNextSequence: the Algorithm returned an invalid or "
+            "no-op command " + std::to_string(kMaxAlgorithmAttempts) + " times in a row");
+    }
 
     PendingMovementSequence pending;
     pending.scan_orientation = command.scan_orientation;
@@ -400,41 +477,59 @@ common_types::DroneStepResult DroneControlImpl::step() {
         pending.movements.pop_front();
     }
 
-    // Movement is executed before any scan, per MappingStepCommand's contract. Movement is the
-    // one dispatch step allowed to throw (e.g. MockMovement rejecting a real wall collision it
-    // alone can see): caught narrowly here, without touching the scan block below, so a
-    // collision is reported the same way as a movement that returns success=false, and never
-    // reaches lidar_.scan() or increments step_index_. Any remaining chunks of this sequence are
-    // discarded: the whole original command is being reported as failed, so there is no partial
-    // sequence left to resume.
+    // Movement is executed before any scan, per MappingStepCommand's contract. A thrown exception
+    // (e.g. MockMovement rejecting a real wall collision it alone can see) is caught narrowly
+    // here, without touching the scan block below, and is never retried (Optional Common-Issues
+    // row 7 covers only a returned success=false, not an exception) -- it is reported immediately,
+    // and, as before, never reaches lidar_.scan() or increments step_index_. Any remaining chunks
+    // of this sequence are discarded: the whole original command is being reported as failed, so
+    // there is no partial sequence left to resume.
     if (movement_to_dispatch) {
         const common_types::MovementCommand& movement = *movement_to_dispatch;
         common_types::MovementResult result{};
 
-        try {
-            switch (movement.type) {
-                case common_types::MovementCommandType::Hover:
-                    break;
-                case common_types::MovementCommandType::Rotate:
-                    result = movement_.rotate(movement.rotation, movement.angle);
-                    break;
-                case common_types::MovementCommandType::Advance:
-                    result = movement_.advance(movement.distance);
-                    break;
-                case common_types::MovementCommandType::Elevate:
-                    result = movement_.elevate(movement.distance);
-                    break;
+        // Optional Common-Issues row 7 ("The movement driver returns false"): retry the exact
+        // same already-prepared chunk (post row-10 amendment, post row-8 splitting) up to
+        // kMaxMovementAttempts total driver calls. Never re-consults the Algorithm, never advances
+        // to a later pending row-8 chunk (pending.movements is untouched here), and never touches
+        // internal_position_/step_index_/scan state for a failed attempt -- only a genuinely
+        // successful attempt falls through to row 12 below. Hover never calls movement_ at all, so
+        // it is unaffected: `result` keeps its default success=true and the loop exits on its
+        // first iteration.
+        bool movement_succeeded = false;
+        for (int attempt = 0; attempt < kMaxMovementAttempts; ++attempt) {
+            try {
+                switch (movement.type) {
+                    case common_types::MovementCommandType::Hover:
+                        break;
+                    case common_types::MovementCommandType::Rotate:
+                        result = movement_.rotate(movement.rotation, movement.angle);
+                        break;
+                    case common_types::MovementCommandType::Advance:
+                        result = movement_.advance(movement.distance);
+                        break;
+                    case common_types::MovementCommandType::Elevate:
+                        result = movement_.elevate(movement.distance);
+                        break;
+                }
+            } catch (const std::exception& e) {
+                pending_sequence_.reset();
+                return common_types::DroneStepResult{
+                    common_types::DroneStepStatus::Error, e.what()};
             }
-        } catch (const std::exception& e) {
-            pending_sequence_.reset();
-            return common_types::DroneStepResult{
-                common_types::DroneStepStatus::Error, e.what()};
+
+            if (result.success) {
+                movement_succeeded = true;
+                break;
+            }
         }
 
-        if (!result.success) {
+        if (!movement_succeeded) {
             pending_sequence_.reset();
-            return common_types::DroneStepResult{
-                common_types::DroneStepStatus::Error, result.message};
+            throw std::runtime_error(
+                "DroneControlImpl::step: the movement driver returned failure " +
+                std::to_string(kMaxMovementAttempts) +
+                " times in a row for the same movement chunk: " + result.message);
         }
 
         // Optional Common-Issues row 12 ("A movement executed but GPS updated with impossible
@@ -490,11 +585,47 @@ common_types::DroneStepResult DroneControlImpl::step() {
         // was itself ignored/rejected.
         const Position3D post_move_pos = movement_to_dispatch ? *internal_position_ : gps_position;
         const Orientation post_move_heading = gps_.heading();
-        const common_types::LidarScanResult scan =
-            lidar_.scan(*scan_orientation);
 
-        ScanResultToVoxels::applyToMap(
-            output_map_, post_move_pos, post_move_heading, scan, lidar_.config());
+        // Optional Common-Issues row 6 ("The LiDAR returns an empty vector"): retry only the scan
+        // itself -- same orientation, no re-dispatched movement, no fresh Algorithm call -- up to
+        // kMaxLidarScanAttempts total attempts before giving up on a faulty LiDAR. A thrown
+        // exception from lidar_.scan() itself (e.g. its own map access failing) is a distinct,
+        // non-Row-6 failure mode: reported immediately as Error, never retried as if it were an
+        // empty result, and never touching step_index_/latest_scan_. This catch is scoped to just
+        // the lidar_.scan() call so the Row-6 exhaustion throw below stays outside it and keeps
+        // propagating unchanged.
+        common_types::LidarScanResult scan;
+        bool scan_accepted = false;
+        for (int attempt = 0; attempt < kMaxLidarScanAttempts; ++attempt) {
+            try {
+                scan = lidar_.scan(*scan_orientation);
+            } catch (const std::exception& e) {
+                return common_types::DroneStepResult{
+                    common_types::DroneStepStatus::Error, e.what()};
+            }
+            if (!scan.empty()) {
+                scan_accepted = true;
+                break;
+            }
+        }
+        if (!scan_accepted) {
+            throw std::runtime_error(
+                "DroneControlImpl::step: the LiDAR returned an empty scan " +
+                std::to_string(kMaxLidarScanAttempts) + " times in a row");
+        }
+
+        // A thrown exception from applyToMap (e.g. underlying map access/atVoxel/set failing) is
+        // likewise reported as Error rather than escaping step(): step_index_ is not incremented,
+        // and the new scan is never assigned to latest_scan_ unless applyToMap actually completed
+        // -- no attempt is made to roll back any partial map writes applyToMap may have already
+        // performed before throwing.
+        try {
+            ScanResultToVoxels::applyToMap(
+                output_map_, post_move_pos, post_move_heading, scan, lidar_.config());
+        } catch (const std::exception& e) {
+            return common_types::DroneStepResult{
+                common_types::DroneStepStatus::Error, e.what()};
+        }
         latest_scan_ = scan;
     } else {
         latest_scan_ = std::nullopt;

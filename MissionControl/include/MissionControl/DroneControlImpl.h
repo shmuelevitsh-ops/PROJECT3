@@ -51,6 +51,12 @@ private:
     // Algorithm-issued command, never once per chunk. `gps_position` is the GPS reading step()
     // already took at the top of this call (Optional Common-Issues row 11 validation) --
     // reused here instead of re-reading gps_.position() a second time.
+    //
+    // Optional Common-Issues rows 3 ("invalid values") and 4 ("NOOP"): a command with a
+    // non-finite active numeric field, or a Working command with neither movement nor scan, is
+    // rejected and the Algorithm is asked again -- same DroneState/step_index, same
+    // latest_scan -- up to a shared budget of kMaxAlgorithmAttempts total attempts. Throws
+    // std::runtime_error if every attempt is rejected.
     [[nodiscard]] PendingMovementSequence prepareNextSequence(const common::Position3D& gps_position);
 
     // Reads gps_.position() (and up to 3 additional retries) looking for a reading that is both

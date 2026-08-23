@@ -41,6 +41,7 @@ using ::testing::Eq;
 using ::testing::Invoke;
 using ::testing::NiceMock;
 using ::testing::Return;
+using ::testing::Throw;
 
 namespace {
 
@@ -76,6 +77,13 @@ LidarConfigData lidarConfig() {
 MappingStepCommand workingCommand() {
     MappingStepCommand command;
     command.status = AlgorithmStatus::Working;
+    // Hover so this stays a legitimate "nothing happens" step rather than a faulty NOOP
+    // (Optional Common-Issues row 4: Working with neither movement nor scan). gps_ here always
+    // returns a default-constructed Position3D (never stubbed with a per-test sequence in this
+    // file), so Hover's row-12 post-movement re-read always matches trivially.
+    MovementCommand hover;
+    hover.type = MovementCommandType::Hover;
+    command.movement = hover;
     return command;
 }
 
@@ -91,9 +99,14 @@ MappingStepCommand unmappableVoxelsCommand() {
     return command;
 }
 
-// A movement command whose mocked IDroneMovement::advance() call (set up by the caller)
-// fails, driving DroneControlImpl::step() to DroneStepStatus::Error with that message --
-// the only way to reach Error now that IDroneControl is no longer injected directly.
+// A movement command whose mocked IDroneMovement::advance() call (set up by the caller, via
+// Throw(std::runtime_error(...)) -- see the file's using-declarations) throws, driving
+// DroneControlImpl::step() to DroneStepStatus::Error with that message -- the only way to reach
+// Error now that IDroneControl is no longer injected directly. A *returned* success=false is no
+// longer the right fixture for this: Optional Common-Issues row 7 retries it up to 3 times
+// against the same chunk before giving up, and even then throws rather than returning Error, so
+// these Row-9 (Error-is-non-terminal) tests script a movement exception instead, exactly like a
+// real MockMovement wall collision -- a distinct, still-immediate, still-unretried Error path.
 MappingStepCommand advanceCommand() {
     MappingStepCommand command;
     MovementCommand movement;
@@ -184,7 +197,7 @@ TEST_F(MissionControl, ErrorStatusIsLoggedAndMissionContinuesToCompleted) {
     EXPECT_CALL(algorithm_, nextStep(_, _))
         .WillOnce(Return(advanceCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
@@ -203,7 +216,7 @@ TEST_F(MissionControl, ErrorThenContinueThenCompletedRunsAllThreeSteps) {
         .WillOnce(Return(advanceCommand()))
         .WillOnce(Return(workingCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
@@ -220,8 +233,8 @@ TEST_F(MissionControl, MultipleErrorsAreAllRetainedInOrderBeforeCompleted) {
         .WillOnce(Return(advanceCommand()))
         .WillOnce(Return(finishedCommand()));
     EXPECT_CALL(movement_, advance(_))
-        .WillOnce(Return(MovementResult{false, "first obstacle"}))
-        .WillOnce(Return(MovementResult{false, "second obstacle"}));
+        .WillOnce(Throw(std::runtime_error("first obstacle")))
+        .WillOnce(Throw(std::runtime_error("second obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
@@ -239,7 +252,7 @@ TEST_F(MissionControl, ErrorsUntilMaxStepsReportsMaxStepsNotError) {
     // error retained.
     constexpr std::size_t kMaxSteps = 3;
     EXPECT_CALL(algorithm_, nextStep(_, _)).Times(kMaxSteps).WillRepeatedly(Return(advanceCommand()));
-    EXPECT_CALL(movement_, advance(_)).Times(kMaxSteps).WillRepeatedly(Return(MovementResult{false, "blocked"}));
+    EXPECT_CALL(movement_, advance(_)).Times(kMaxSteps).WillRepeatedly(Throw(std::runtime_error("blocked")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(kMaxSteps);
     const MissionRunResult result = mission_control->runMission();
@@ -254,7 +267,7 @@ TEST_F(MissionControl, ErrorOnFinalAvailableStepReportsMaxStepsAndRetainsError) 
     EXPECT_CALL(algorithm_, nextStep(_, _))
         .WillOnce(Return(workingCommand()))
         .WillOnce(Return(advanceCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked at the end"}));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked at the end")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(kMaxSteps);
     const MissionRunResult result = mission_control->runMission();
@@ -278,7 +291,7 @@ TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenErrorOccursThenCompletes) {
     EXPECT_CALL(algorithm_, nextStep(_, _))
         .WillOnce(Return(advanceCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
     EXPECT_CALL(output_map_, save(_)).Times(1);
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
@@ -366,7 +379,7 @@ TEST_F(MissionControl, ErrorStatusReportsStepCountAndDroneControlErrorCode) {
     EXPECT_CALL(algorithm_, nextStep(_, _))
         .WillOnce(Return(advanceCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
@@ -388,4 +401,25 @@ TEST_F(MissionControl, UnmappableVoxelsErrorHasExpectedCodeAndMessage) {
     ASSERT_EQ(result.errors.size(), 1u);
     EXPECT_EQ(result.errors[0].code, "UNMAPPABLE_VOXELS_REMAINING");
     EXPECT_EQ(result.errors[0].message, "mapping finished with unmappable voxels remaining");
+}
+
+// --- Phase 2B fix 2: output_map_.save() failure in MissionControlImpl::runMission() --------
+//
+// The mission's outcome (status/steps/errors) is already fully determined by the time save() is
+// called; a save failure must not erase that outcome by propagating out of runMission() -- it is
+// appended as an additional OUTPUT_MAP_SAVE_FAILED error and the already-determined result is
+// still returned normally.
+TEST_F(MissionControl, OutputMapSaveFailureIsAppendedAsErrorWithoutErasingMissionResult) {
+    EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(finishedCommand()));
+    EXPECT_CALL(output_map_, save(_)).WillOnce([]() { throw std::runtime_error("disk full"); });
+
+    const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
+    MissionRunResult result;
+    EXPECT_NO_THROW(result = mission_control->runMission());
+
+    EXPECT_EQ(result.status, MissionRunStatus::Completed);
+    EXPECT_EQ(result.steps, 1u);
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors[0].code, "OUTPUT_MAP_SAVE_FAILED");
+    EXPECT_EQ(result.errors[0].message, "disk full");
 }

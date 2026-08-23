@@ -475,6 +475,52 @@ TEST_F(SimulationRun, ErrorStatusFromMissionControlScoresNegativeOnePreservesRes
     EXPECT_EQ(result.mission_results[0].errors[0].message, "blocked by obstacle");
 }
 
+// Phase 2B fix 3: MapsComparison::compare() can throw via map access (atVoxel) even though
+// mission_control_->runMission() already returned a valid, non-Error result. Only
+// scoring/comparison must be treated as failed here -- the mission result itself
+// (status/steps/errors) is preserved unchanged, and a MAP_COMPARISON_FAILED error is appended
+// alongside it, with mission_score forced to -1.0. Built via the same manual/direct constructor
+// pattern as ErrorStatusFromMissionControlScoresNegativeOnePreservesResultAndSkipsMapComparison
+// above, so hidden_map's atVoxel() can be made to throw.
+TEST_F(SimulationRun, MapComparisonThrowingPreservesMissionResultAndScoresNegativeOne) {
+    auto hidden_map = makeStubMap(gridConfig(4, 10.0), VoxelOccupancy::Occupied);
+    auto output_map = makeStubMap(gridConfig(4, 10.0), VoxelOccupancy::Occupied);
+    ON_CALL(*hidden_map, atVoxel(_)).WillByDefault([]() -> VoxelOccupancy {
+        throw std::runtime_error("hidden map access fault");
+    });
+
+    auto gps = std::make_unique<NiceMock<test::GMockIGPS>>();
+    auto movement = std::make_unique<NiceMock<test::GMockIDroneMovement>>();
+    auto lidar = std::make_unique<NiceMock<test::GMockILidar>>();
+    auto mapping_algorithm = std::make_unique<NiceMock<test::GMockIMappingAlgorithm>>(
+        MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *output_map});
+
+    auto mission_control = std::make_unique<NiceMock<test::GMockIMissionControl>>();
+    const MissionRunResult expected{
+        MissionRunStatus::Completed, 5, {ErrorRef{"UNMAPPABLE_VOXELS_REMAINING", "mapping finished with unmappable voxels remaining"}}};
+    EXPECT_CALL(*mission_control, runMission()).WillOnce(Return(expected));
+
+    SimulationRunImpl run(std::move(hidden_map), std::move(output_map), std::move(gps), std::move(movement),
+                         std::move(lidar), std::move(mapping_algorithm),
+                         std::move(mission_control), simulationConfig(), missionConfig(), "out.npy");
+    SimulationResult result;
+    EXPECT_NO_THROW(result = run.run());
+
+    EXPECT_DOUBLE_EQ(result.mission_score, -1.0);
+
+    ASSERT_EQ(result.mission_results.size(), 1u);
+    EXPECT_EQ(result.mission_results[0].status, expected.status)
+        << "the mission already completed successfully -- only scoring failed, so status must "
+           "not be changed to Error";
+    EXPECT_EQ(result.mission_results[0].steps, expected.steps);
+    ASSERT_EQ(result.mission_results[0].errors.size(), 2u)
+        << "the mission's own pre-existing error must be preserved, with MAP_COMPARISON_FAILED "
+           "appended alongside it";
+    EXPECT_EQ(result.mission_results[0].errors[0].code, "UNMAPPABLE_VOXELS_REMAINING");
+    EXPECT_EQ(result.mission_results[0].errors[1].code, "MAP_COMPARISON_FAILED");
+    EXPECT_EQ(result.mission_results[0].errors[1].message, "hidden map access fault");
+}
+
 TEST_F(SimulationRun, RunPopulatesOutputMapFileFromConstructorArgument) {
     auto mission_control = std::make_unique<NiceMock<test::GMockIMissionControl>>();
     ON_CALL(*mission_control, runMission()).WillByDefault(Return(MissionRunResult{}));

@@ -2,6 +2,7 @@
 
 #include <Simulator/MapsComparison.h>
 
+#include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -120,10 +121,21 @@ types::SimulationResult SimulationRunImpl::run() {
     if (mission_result.status == common_types::MissionRunStatus::Error) {
     result.mission_score = -1.0;
     } else {
-        const std::vector<double> scores =
-            MapsComparison::compare(*hidden_map_, {output_map_.get()});
+        // MapsComparison::compare() can throw via map access (e.g. atVoxel) even though the
+        // mission itself already completed with a valid result -- only scoring/comparison
+        // failed, so the mission result (status/steps/errors) is left untouched here; this is
+        // appended as an extra error rather than the mission being turned into an Error.
+        try {
+            const std::vector<double> scores =
+                MapsComparison::compare(*hidden_map_, {output_map_.get()});
 
-        result.mission_score = scores[0];
+            result.mission_score = scores[0];
+        } catch (const std::exception& e) {
+            std::cerr << "SimulationRunImpl::run: map comparison failed: " << e.what() << '\n';
+            result.mission_score = -1.0;
+            result.mission_results[0].errors.push_back(
+                common_types::ErrorRef{"MAP_COMPARISON_FAILED", e.what()});
+        }
     }
 
     return result;

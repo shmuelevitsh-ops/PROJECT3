@@ -110,6 +110,14 @@ MovementCommand hoverCommand() {
     return command;
 }
 
+// A single-hit scan result, used throughout as the generic "the scan succeeded" filler wherever
+// a test's point is something else entirely (movement/scan ordering, orientation forwarding,
+// chunk sequencing, GPS baseline handling, ...). An empty vector no longer serves this purpose:
+// since Optional Common-Issues row 6 ("The LiDAR returns an empty vector"), an empty
+// lidar_.scan() result is retried and eventually thrown on, so any filler scan return must be
+// non-empty to avoid accidentally exercising that retry logic.
+LidarScanResult nonEmptyScanResult() { return LidarScanResult{LidarHit{}}; }
+
 // Returns a gmock action body that replies with successive entries of `positions` on successive
 // calls, holding at the last entry for any calls beyond the list's length. Used throughout to
 // give gps_.position() a sequence of readings consistent with DroneControlImpl's own internal
@@ -173,13 +181,21 @@ protected:
     void SetUp() override {
         ON_CALL(output_map_, getMapConfig()).WillByDefault(Return(unboundedMapConfig()));
         ON_CALL(output_map_, isInBounds(_)).WillByDefault(Invoke(isInBoundsFor(unboundedMapConfig().boundaries)));
+        // Default to a non-empty scan (Optional Common-Issues row 6 treats an empty vector as a
+        // faulty LiDAR result to retry/throw on) so tests that don't care about scan content --
+        // and so never override this -- don't accidentally exercise that retry logic.
+        ON_CALL(lidar_, scan(_)).WillByDefault(Return(nonEmptyScanResult()));
     }
 };
 
 } // namespace
 
 TEST_F(DroneControl, FirstStepPassesNullLatestScanToAlgorithm) {
-    EXPECT_CALL(algorithm_, nextStep(_, IsNull())).WillOnce(Return(MappingStepCommand{}));
+    // A Hover movement (rather than a bare default-constructed command) keeps this a legitimate
+    // "nothing happens, Working" step rather than a faulty NOOP (Optional Common-Issues row 4).
+    MappingStepCommand command;
+    command.movement = hoverCommand();
+    EXPECT_CALL(algorithm_, nextStep(_, IsNull())).WillOnce(Return(command));
 
     const DroneStepResult result = control_.step();
 
@@ -195,7 +211,7 @@ TEST_F(DroneControl, RotateMovementCallsRotateBeforeScan) {
     InSequence seq;
     EXPECT_CALL(movement_, rotate(RotationDirection::Left, 10.0 * horizontal_angle[deg]))
         .WillOnce(Return(MovementResult{true, ""}));
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     (void)control_.step();
 }
@@ -215,7 +231,7 @@ TEST_F(DroneControl, AdvanceMovementCallsAdvanceBeforeScan) {
 
     InSequence seq;
     EXPECT_CALL(movement_, advance(20.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     (void)control_.step();
 }
@@ -233,7 +249,7 @@ TEST_F(DroneControl, ElevateMovementCallsElevateBeforeScan) {
 
     InSequence seq;
     EXPECT_CALL(movement_, elevate(15.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     (void)control_.step();
 }
@@ -258,7 +274,7 @@ TEST_F(DroneControl, ElevateMovementForwardsNegativeDistanceUnchanged) {
 
     InSequence seq;
     EXPECT_CALL(movement_, elevate(-10.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     (void)control_.step();
 }
@@ -278,7 +294,10 @@ TEST_F(DroneControl, HoverMovementDoesNotCallAnyMovementMethod) {
 }
 
 TEST_F(DroneControl, NoScanOrientationDoesNotCallLidarScan) {
-    MappingStepCommand command; // movement and scan_orientation both unset
+    // scan_orientation unset; movement set to Hover so this stays a legitimate "nothing happens"
+    // step rather than a faulty NOOP (Optional Common-Issues row 4).
+    MappingStepCommand command;
+    command.movement = hoverCommand();
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
 
     EXPECT_CALL(lidar_, scan(_)).Times(0);
@@ -292,7 +311,7 @@ TEST_F(DroneControl, ScanOrientationSetCallsLidarScanWithGivenOrientation) {
     command.scan_orientation = orientation;
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
 
-    EXPECT_CALL(lidar_, scan(OrientationEq(orientation))).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(OrientationEq(orientation))).WillOnce(Return(nonEmptyScanResult()));
 
     (void)control_.step();
 }
@@ -305,7 +324,10 @@ TEST_F(DroneControl, ScanResultIsPassedAsLatestScanToNextStepOnly) {
     MappingStepCommand scanning_command;
     scanning_command.scan_orientation = Orientation{};
 
-    MappingStepCommand idle_command; // no movement, no scan
+    // Hover (not a bare no-movement/no-scan command) so these idle steps stay legitimate
+    // "nothing happens" results rather than faulty NOOPs (Optional Common-Issues row 4).
+    MappingStepCommand idle_command;
+    idle_command.movement = hoverCommand();
 
     auto isNullScan = [](const LidarScanResult* scan) { return scan == nullptr; };
     auto isSingleHitScan = [](const LidarScanResult* scan) { return scan != nullptr && scan->size() == 1; };
@@ -322,8 +344,11 @@ TEST_F(DroneControl, ScanResultIsPassedAsLatestScanToNextStepOnly) {
 }
 
 TEST_F(DroneControl, WorkingStatusMapsToContinue) {
+    // Hover movement so this is a legitimate Working "nothing happens" step, not a faulty NOOP
+    // (Optional Common-Issues row 4).
     MappingStepCommand command;
     command.status = AlgorithmStatus::Working;
+    command.movement = hoverCommand();
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
 
     EXPECT_EQ(control_.step().status, DroneStepStatus::Continue);
@@ -370,27 +395,31 @@ TEST_F(DroneControl, UnrecognizedAlgorithmStatusMapsToErrorNotSilentContinue) {
     EXPECT_FALSE(result.message.empty()) << "the error must carry a descriptive message";
 }
 
-TEST_F(DroneControl, MovementFailureReturnsErrorWithoutScanningOrAdvancingStepIndex) {
+// Optional Common-Issues row 7 ("The movement driver returns false"): a single false no longer
+// terminates the step immediately -- it retries the same chunk up to kMaxMovementAttempts total
+// driver calls (see the dedicated row-7 test section below). Only once all of them return false
+// does step() give up -- and, per row 7, that is a throw, not an Error DroneStepResult.
+TEST_F(DroneControl, MovementFailureRetriesExhaustedThrowsWithoutScanningOrAdvancingStepIndex) {
     MappingStepCommand command;
     command.movement = advanceCommand(10.0 * isq::length[cm]);
     command.scan_orientation = Orientation{}; // should never be reached
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
 
     EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
-        .WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+        .Times(3)
+        .WillRepeatedly(Return(MovementResult{false, "blocked by obstacle"}));
     EXPECT_CALL(lidar_, scan(_)).Times(0);
 
-    const DroneStepResult result = control_.step();
-
-    EXPECT_EQ(result.status, DroneStepStatus::Error);
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
     EXPECT_EQ(control_.state().step_index, 0u);
 }
 
 // Movement collision scenario: MockMovement (the real implementation, not this mock) rejects a
 // real wall collision by throwing rather than returning success=false, since it alone can see
-// the hidden map. step() must catch that narrowly around the movement dispatch, report it the
-// same way as a returned failure (Error, without scanning or advancing step_index_), and must
-// never let the exception itself escape step().
+// the hidden map. step() must catch that narrowly around the movement dispatch, report it as an
+// Error DroneStepResult without scanning or advancing step_index_, and must never let the
+// exception itself escape step() -- and, unlike a returned success=false (row 7), it is never
+// retried.
 TEST_F(DroneControl, MovementExceptionReturnsErrorWithoutScanningOrAdvancingStepIndex) {
     MappingStepCommand command;
     command.movement = advanceCommand(10.0 * isq::length[cm]);
@@ -410,7 +439,10 @@ TEST_F(DroneControl, MovementExceptionReturnsErrorWithoutScanningOrAdvancingStep
 }
 
 TEST_F(DroneControl, StepIndexIncrementsOnSuccessfulStepsOnly) {
-    MappingStepCommand command; // no movement, no scan, Working
+    // Hover, no scan, Working: a legitimate "nothing happens" step, not a faulty NOOP (Optional
+    // Common-Issues row 4).
+    MappingStepCommand command;
+    command.movement = hoverCommand();
     EXPECT_CALL(algorithm_, nextStep(_, _)).Times(3).WillRepeatedly(Return(command));
 
     ASSERT_EQ(control_.state().step_index, 0u);
@@ -428,7 +460,10 @@ TEST_F(DroneControl, StepIndexIncrementsOnSuccessfulStepsOnly) {
 // control_.state() (as StepIndexIncrementsOnSuccessfulStepsOnly above does) --
 // a more direct check of what nextStep() itself observes.
 TEST_F(DroneControl, StepIndexSeenByAlgorithmIncrementsAcrossFirstTwoSteps) {
-    MappingStepCommand command; // no movement, no scan, Working
+    // Hover, no scan, Working: a legitimate "nothing happens" step, not a faulty NOOP (Optional
+    // Common-Issues row 4).
+    MappingStepCommand command;
+    command.movement = hoverCommand();
     DroneState first_seen_state{};
     DroneState second_seen_state{};
     EXPECT_CALL(algorithm_, nextStep(_, _))
@@ -449,14 +484,18 @@ TEST_F(DroneControl, StepIndexIsNotIncrementedIfScanningThrows) {
     // lidar_.scan() throws mid-step, step_index_ must still reflect the *last actually completed*
     // step, not a step that never finished. A bug that moves the increment earlier (e.g. right
     // after movement, before scanning) would leave step_index_ one ahead of what was truly
-    // scanned whenever an exception escapes from the scan block.
+    // scanned whenever an exception escapes from the scan block. A scan/map-processing exception
+    // (Phase 2B fix) is caught locally and reported as DroneStepStatus::Error -- it no longer
+    // escapes step() as a raw exception.
     MappingStepCommand command;
     command.scan_orientation = Orientation{};
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
     EXPECT_CALL(lidar_, scan(_)).WillOnce([]() -> LidarScanResult { throw std::runtime_error("lidar fault"); });
 
     ASSERT_EQ(control_.state().step_index, 0u);
-    EXPECT_THROW(control_.step(), std::runtime_error);
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Error);
+    EXPECT_EQ(result.message, "lidar fault");
     EXPECT_EQ(control_.state().step_index, 0u)
         << "step_index_ must not be incremented for a step whose scan never completed";
 }
@@ -471,7 +510,7 @@ TEST_F(DroneControl, PositionAndHeadingAreReReadAfterMovementBeforeScanning) {
     command.scan_orientation = Orientation{};
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
     EXPECT_CALL(movement_, advance(10.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     // Second reading must equal the physically-expected post-movement position (x=10cm along the
     // default 0deg heading) or row 12's validation would keep retrying instead of proceeding
@@ -544,9 +583,10 @@ TEST_F(DroneControl, ScanResultAppliedAtPostMovementPositionNotPreMovement) {
 }
 
 TEST_F(DroneControl, MovementFailureDoesNotClearPreviousLatestScan) {
-    // Documented in DroneControlImpl::step(): on movement failure, "do not touch latest_scan_".
-    // A bug that unconditionally resets it to nullopt (matching the no-scan-this-step branch)
-    // would lose the previous step's scan data instead of preserving it.
+    // Documented in DroneControlImpl::step(): on exhausted movement retries (Optional
+    // Common-Issues row 7), latest_scan_ is left untouched. A bug that unconditionally resets it
+    // to nullopt (matching the no-scan-this-step branch) would lose the previous step's scan data
+    // instead of preserving it.
     LidarHit hit;
     hit.distance = 10.0 * isq::length[cm];
     const LidarScanResult scan_result{hit};
@@ -557,7 +597,10 @@ TEST_F(DroneControl, MovementFailureDoesNotClearPreviousLatestScan) {
     MappingStepCommand failing_move_command;
     failing_move_command.movement = advanceCommand(10.0 * isq::length[cm]);
 
+    // Hover so this idle step stays legitimate rather than a faulty NOOP (Optional Common-Issues
+    // row 4).
     MappingStepCommand idle_command;
+    idle_command.movement = hoverCommand();
 
     auto isNullScan = [](const LidarScanResult* scan) { return scan == nullptr; };
     auto isSingleHitScan = [](const LidarScanResult* scan) { return scan != nullptr && scan->size() == 1; };
@@ -566,12 +609,14 @@ TEST_F(DroneControl, MovementFailureDoesNotClearPreviousLatestScan) {
     EXPECT_CALL(algorithm_, nextStep(_, Truly(isNullScan))).WillOnce(Return(scanning_command));
     EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(scan_result));
     EXPECT_CALL(algorithm_, nextStep(_, Truly(isSingleHitScan))).WillOnce(Return(failing_move_command));
-    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm])).WillOnce(Return(MovementResult{false, "blocked"}));
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
+        .Times(3)
+        .WillRepeatedly(Return(MovementResult{false, "blocked"}));
     EXPECT_CALL(algorithm_, nextStep(_, Truly(isSingleHitScan))).WillOnce(Return(idle_command));
 
-    (void)control_.step();                                  // step 1: scans, stores latest_scan_ (1 hit)
-    const DroneStepResult failed = control_.step();          // step 2: movement fails before touching latest_scan_
-    ASSERT_EQ(failed.status, DroneStepStatus::Error);
+    (void)control_.step();  // step 1: scans, stores latest_scan_ (1 hit)
+    EXPECT_THROW((void)control_.step(), std::runtime_error)
+        << "step 2: 3 exhausted movement retries throw before ever touching latest_scan_";
     (void)control_.step();  // step 3: must still see step 1's latest_scan_, not nullptr
 }
 
@@ -790,7 +835,7 @@ TEST_F(DroneControl, IgnoredMovementDoesNotPreventRequestedScanFromRunning) {
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(command));
 
     EXPECT_CALL(movement_, advance(_)).Times(0);
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     const DroneStepResult result = control_.step();
     EXPECT_EQ(result.status, DroneStepStatus::Continue);
@@ -990,7 +1035,7 @@ TEST_F(DroneControl, ScanFromOriginalCommandIsAttachedOnlyToFinalChunk) {
     EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
     EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
     EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
-    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(LidarScanResult{}));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
 
     (void)control_.step();
     (void)control_.step();
@@ -1105,12 +1150,13 @@ TEST_F(DroneControl, OutOfBoundsAmendmentAppliesBeforeSplitting) {
 }
 
 TEST_F(DroneControl, MovementFailureOnIntermediateChunkPreservesFailureSemantics) {
-    // Chunk 1 of 3 (50cm) succeeds; chunk 2 fails. Current failure semantics must hold for that
-    // failing chunk: Error, no scan, step_index_ not incremented for it. Then: a further step()
-    // call must fetch a brand-new command from the algorithm rather than resuming the
-    // undispatched remainder (the would-be chunk 3, another 50cm) of the failed sequence -- proven
-    // by scripting a distinct new command (an unrelated Elevate) and observing that it, not a 3rd
-    // advance(), is what gets dispatched next.
+    // Chunk 1 of 3 (50cm) succeeds; chunk 2 fails 3 times in a row (Optional Common-Issues row
+    // 7's exhausted retry budget, all against the same 50cm chunk -- never chunk 3's would-be
+    // 50cm). Exhausting it throws rather than returning Error: no scan, step_index_ not
+    // incremented for it. Then: a further step() call must fetch a brand-new command from the
+    // algorithm rather than resuming the undispatched remainder (the would-be chunk 3, another
+    // 50cm) of the failed sequence -- proven by scripting a distinct new command (an unrelated
+    // Elevate) and observing that it, not a 4th advance(), is what gets dispatched next.
     MappingStepCommand oversized_command;
     oversized_command.movement = advanceCommand(150.0 * isq::length[cm]);
 
@@ -1119,7 +1165,7 @@ TEST_F(DroneControl, MovementFailureOnIntermediateChunkPreservesFailureSemantics
 
     // Catch-alls declared first (lowest priority): the specific, ordered expectations below
     // (declared later = higher priority) claim their exact calls, so these only catch anything
-    // else -- in particular a 3rd advance() call, which would mean the leftover chunk 3 of the
+    // else -- in particular a 5th advance() call, which would mean the leftover chunk 3 of the
     // failed sequence was wrongly resumed instead of a fresh command being fetched.
     EXPECT_CALL(movement_, advance(_)).Times(0);
     EXPECT_CALL(lidar_, scan(_)).Times(0);
@@ -1139,7 +1185,8 @@ TEST_F(DroneControl, MovementFailureOnIntermediateChunkPreservesFailureSemantics
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(oversized_command));
     EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
     EXPECT_CALL(movement_, advance(50.0 * isq::length[cm]))
-        .WillOnce(Return(MovementResult{false, "blocked by obstacle"}));
+        .Times(3)
+        .WillRepeatedly(Return(MovementResult{false, "blocked by obstacle"}));
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(next_command));
     EXPECT_CALL(movement_, elevate(5.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
 
@@ -1147,9 +1194,8 @@ TEST_F(DroneControl, MovementFailureOnIntermediateChunkPreservesFailureSemantics
     EXPECT_EQ(chunk1.status, DroneStepStatus::Continue);
     ASSERT_EQ(control_.state().step_index, 1u);
 
-    const DroneStepResult chunk2 = control_.step();
-    EXPECT_EQ(chunk2.status, DroneStepStatus::Error);
-    EXPECT_EQ(chunk2.message, "blocked by obstacle");
+    EXPECT_THROW((void)control_.step(), std::runtime_error)
+        << "chunk 2: 3 exhausted retries against the same 50cm chunk throw";
     EXPECT_EQ(control_.state().step_index, 1u)
         << "step_index_ must not be incremented for the failing chunk";
 
@@ -1293,7 +1339,12 @@ TEST_F(DroneControl, FirstInBoundsGpsReadingInitializesInternalBaseline) {
         .WillRepeatedly(Return(out_of_bounds_position));
     EXPECT_CALL(gps_, heading()).WillRepeatedly(Return(Orientation{}));
 
-    MappingStepCommand idle_command; // no movement, no scan
+    // A scan (rather than a bare no-movement/no-scan command) keeps this a legitimate step
+    // instead of a faulty NOOP (Optional Common-Issues row 4). Unlike a movement (even Hover),
+    // attaching a scan doesn't add a row-12 post-movement gps_.position() re-read, so it doesn't
+    // disturb this test's single-read-per-step GPS sequencing below.
+    MappingStepCommand idle_command;
+    idle_command.scan_orientation = Orientation{};
     EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(idle_command));
 
     const DroneStepResult first = control_.step();
@@ -1335,7 +1386,12 @@ TEST_F(DroneControl, LaterOutOfBoundsGpsWithInBoundsInternalBaselineIsIgnored) {
         .WillRepeatedly(Return(out_of_bounds_position));
     EXPECT_CALL(gps_, heading()).WillRepeatedly(Return(Orientation{}));
 
+    // A scan (rather than a bare no-movement/no-scan command) keeps this a legitimate step
+    // instead of a faulty NOOP (Optional Common-Issues row 4). Unlike a movement (even Hover),
+    // attaching a scan doesn't add a row-12 post-movement gps_.position() re-read, so it doesn't
+    // disturb this test's single-read-per-step GPS sequencing below.
     MappingStepCommand idle_command;
+    idle_command.scan_orientation = Orientation{};
     // Exactly once: the Algorithm must not be consulted again for the ignored step below.
     EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(idle_command));
 
@@ -1364,7 +1420,12 @@ TEST_F(DroneControl, RepeatedIgnoredOutOfBoundsGpsReadingsConsumeSteps) {
         .WillRepeatedly(Return(out_of_bounds_position));
     EXPECT_CALL(gps_, heading()).WillRepeatedly(Return(Orientation{}));
 
+    // A scan (rather than a bare no-movement/no-scan command) keeps this a legitimate step
+    // instead of a faulty NOOP (Optional Common-Issues row 4). Unlike a movement (even Hover),
+    // attaching a scan doesn't add a row-12 post-movement gps_.position() re-read, so it doesn't
+    // disturb this test's single-read-per-step GPS sequencing below.
     MappingStepCommand idle_command;
+    idle_command.scan_orientation = Orientation{};
     EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(idle_command));
 
     (void)control_.step();
@@ -1430,7 +1491,12 @@ TEST_F(DroneControl, OutOfBoundsGpsWithOutOfBoundsInternalBaselineThrows) {
         .WillRepeatedly(Return(out_of_bounds_position));
     EXPECT_CALL(gps_, heading()).WillRepeatedly(Return(Orientation{}));
 
+    // A scan (rather than a bare no-movement/no-scan command) keeps this a legitimate step
+    // instead of a faulty NOOP (Optional Common-Issues row 4). Unlike a movement (even Hover),
+    // attaching a scan doesn't add a row-12 post-movement gps_.position() re-read, so it doesn't
+    // disturb this test's single-read-per-step GPS sequencing below.
     MappingStepCommand idle_command;
+    idle_command.scan_orientation = Orientation{};
     EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(idle_command));
 
     (void)control_.step(); // baseline initialized at the origin, in bounds under the current map
@@ -1794,4 +1860,663 @@ TEST_F(DroneControl, OutOfBoundsPostMovementGpsCloseToExpectedIsNotAcceptedOrUse
         << "a numerically-close-but-out-of-bounds reading must still be rejected -- and since "
            "step() only ever assigns internal_position_ from a *validated* reading, this Error "
            "also proves it was never resynced to this out-of-bounds value";
+}
+
+// --- Optional Common-Issues rows 3 & 4: invalid-value / NOOP algorithm retries -------------
+//
+// Row 3 ("A faulty algorithm returned a command with invalid values"): only non-finite ACTIVE
+// numeric fields are rejected -- Rotate's angle; Advance/Elevate's distance;
+// scan_orientation's horizontal/altitude -- never negative/zero/oversized-but-finite values,
+// unused MovementCommand fields, or enum values. Row 4 ("The algorithm returned a NOOP"): only
+// a Working status with neither movement nor scan is faulty; Finished/FinishedWithUnmappableVoxels
+// with no movement/scan remain legitimate terminal results. Both rows share one budget of 3 total
+// mapping_algorithm_.nextStep() calls per requested command -- the same DroneState/step_index and
+// latest_scan for every attempt -- and exhausting it throws. This all happens only when a *new*
+// command is being requested (prepareNextSequence()); a pending row-8 sequence never re-enters it
+// (see PendingRow8SequenceDoesNotReconsultAlgorithmOrApplyRetryValidation below).
+
+TEST_F(DroneControl, RotateWithNonFiniteAngleIsRejectedAndValidRetrySucceeds) {
+    MappingStepCommand invalid_command;
+    invalid_command.movement =
+        rotateCommand(std::numeric_limits<double>::quiet_NaN() * horizontal_angle[deg]);
+
+    MappingStepCommand valid_command;
+    valid_command.movement = rotateCommand(10.0 * horizontal_angle[deg]);
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(valid_command));
+    EXPECT_CALL(movement_, rotate(RotationDirection::Left, 10.0 * horizontal_angle[deg]))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+    EXPECT_EQ(control_.state().step_index, 1u)
+        << "the rejected attempt must not consume a separate step -- only the eventual valid "
+           "command's own dispatch does";
+}
+
+TEST_F(DroneControl, AdvanceWithInfiniteDistanceIsRejectedAndValidRetrySucceeds) {
+    MappingStepCommand invalid_command;
+    invalid_command.movement = advanceCommand(std::numeric_limits<double>::infinity() * isq::length[cm]);
+
+    MappingStepCommand valid_command;
+    valid_command.movement = advanceCommand(20.0 * isq::length[cm]);
+
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{20.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(valid_command));
+    EXPECT_CALL(movement_, advance(20.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, ElevateWithNaNDistanceIsRejectedAndValidRetrySucceeds) {
+    MappingStepCommand invalid_command;
+    invalid_command.movement = elevateCommand(std::numeric_limits<double>::quiet_NaN() * isq::length[cm]);
+
+    MappingStepCommand valid_command;
+    valid_command.movement = elevateCommand(12.0 * isq::length[cm]);
+
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{0.0 * x_extent[cm], 0.0 * y_extent[cm], 12.0 * z_extent[cm]}})));
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(valid_command));
+    EXPECT_CALL(movement_, elevate(12.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, ScanOrientationWithNonFiniteHorizontalIsRejectedAndValidRetrySucceeds) {
+    MappingStepCommand invalid_command;
+    invalid_command.scan_orientation =
+        Orientation{std::numeric_limits<double>::quiet_NaN() * horizontal_angle[deg], 0.0 * altitude_angle[deg]};
+
+    const Orientation valid_orientation{30.0 * horizontal_angle[deg], 5.0 * altitude_angle[deg]};
+    MappingStepCommand valid_command;
+    valid_command.scan_orientation = valid_orientation;
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(valid_command));
+    EXPECT_CALL(lidar_, scan(OrientationEq(valid_orientation))).WillOnce(Return(nonEmptyScanResult()));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, ScanOrientationWithInfiniteAltitudeIsRejectedAndValidRetrySucceeds) {
+    MappingStepCommand invalid_command;
+    invalid_command.scan_orientation = Orientation{
+        0.0 * horizontal_angle[deg], std::numeric_limits<double>::infinity() * altitude_angle[deg]};
+
+    const Orientation valid_orientation{15.0 * horizontal_angle[deg], -10.0 * altitude_angle[deg]};
+    MappingStepCommand valid_command;
+    valid_command.scan_orientation = valid_orientation;
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(valid_command));
+    EXPECT_CALL(lidar_, scan(OrientationEq(valid_orientation))).WillOnce(Return(nonEmptyScanResult()));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, NegativeAdvanceDistanceDoesNotTriggerRetry) {
+    // Negative-but-finite values are never row-3 invalid (only Row 10's OOB handling and Row 8's
+    // splitting may amend them) -- the algorithm must be consulted exactly once.
+    MappingStepCommand command;
+    command.movement = advanceCommand(-15.0 * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{-15.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    EXPECT_CALL(movement_, advance(-15.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, ZeroRotateAngleDoesNotTriggerRetry) {
+    // Zero is finite and therefore never row-3 invalid.
+    MappingStepCommand command;
+    command.movement = rotateCommand(0.0 * horizontal_angle[deg]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, rotate(RotationDirection::Left, 0.0 * horizontal_angle[deg]))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, ThreeInvalidCommandsInARowThrows) {
+    MappingStepCommand invalid_command;
+    invalid_command.movement = advanceCommand(std::numeric_limits<double>::quiet_NaN() * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(3).WillRepeatedly(Return(invalid_command));
+
+    EXPECT_CALL(movement_, advance(_)).Times(0);
+
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
+    EXPECT_EQ(control_.state().step_index, 0u)
+        << "no attempt -- rejected or otherwise -- may consume a step before the throw";
+}
+
+TEST_F(DroneControl, WorkingEmptyCommandIsRejectedAndValidRetrySucceeds) {
+    MappingStepCommand noop_command; // Working, no movement, no scan -- the faulty row-4 NOOP
+    MappingStepCommand valid_command;
+    valid_command.movement = hoverCommand();
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(noop_command))
+        .WillOnce(Return(valid_command));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+    EXPECT_EQ(control_.state().step_index, 1u)
+        << "the rejected NOOP must not consume a separate step";
+}
+
+TEST_F(DroneControl, ThreeWorkingNoopCommandsInARowThrows) {
+    MappingStepCommand noop_command; // Working, no movement, no scan, three times running
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(3).WillRepeatedly(Return(noop_command));
+
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
+    EXPECT_EQ(control_.state().step_index, 0u);
+}
+
+TEST_F(DroneControl, MixedInvalidThenNoopThenValidSucceedsOnThirdAttempt) {
+    // Proves the two failure kinds (row 3 invalid values, row 4 NOOP) draw from the same shared
+    // 3-attempt budget rather than each getting their own: 1 invalid + 1 NOOP + 1 valid, and the
+    // 3rd attempt still succeeds.
+    MappingStepCommand invalid_command;
+    invalid_command.movement =
+        rotateCommand(std::numeric_limits<double>::infinity() * horizontal_angle[deg]);
+    MappingStepCommand noop_command; // Working, no movement, no scan
+    MappingStepCommand valid_command;
+    valid_command.movement = rotateCommand(15.0 * horizontal_angle[deg]);
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(noop_command))
+        .WillOnce(Return(valid_command));
+    EXPECT_CALL(movement_, rotate(RotationDirection::Left, 15.0 * horizontal_angle[deg]))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, MixedInvalidAndNoopExhaustingSharedBudgetThrows) {
+    // Same shared-budget proof as above, but all 3 attempts are rejected (a mix of both kinds),
+    // exhausting the budget without ever succeeding.
+    MappingStepCommand invalid_command;
+    invalid_command.movement = advanceCommand(std::numeric_limits<double>::quiet_NaN() * isq::length[cm]);
+    MappingStepCommand noop_command; // Working, no movement, no scan
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(invalid_command))
+        .WillOnce(Return(noop_command))
+        .WillOnce(Return(invalid_command));
+
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
+    EXPECT_EQ(control_.state().step_index, 0u);
+}
+
+TEST_F(DroneControl, NoopThenFinishedWithNoMovementOrScanSucceedsAsValidTerminalResult) {
+    // Status is what distinguishes a faulty NOOP from a legitimate terminal result (Row 4):
+    // a Finished command with no movement/scan is accepted immediately, even right after a
+    // rejected Working NOOP -- exercising the retry and the terminal-status exemption together.
+    MappingStepCommand noop_command; // Working, no movement, no scan -- rejected
+    MappingStepCommand finished_command;
+    finished_command.status = AlgorithmStatus::Finished; // no movement, no scan -- legitimate
+
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(noop_command))
+        .WillOnce(Return(finished_command));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Completed);
+    EXPECT_EQ(result.message, "mapping finished");
+}
+
+TEST_F(DroneControl, FinishedWithUnmappableVoxelsWithNoMovementOrScanIsNotTreatedAsNoop) {
+    // Same terminal-status exemption for the other non-Working status, checked directly (no
+    // retry involved): the algorithm must be consulted exactly once.
+    MappingStepCommand command; // no movement, no scan
+    command.status = AlgorithmStatus::FinishedWithUnmappableVoxels;
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Completed);
+    EXPECT_EQ(result.message, "mapping finished with unmappable voxels remaining");
+}
+
+TEST_F(DroneControl, PendingRow8SequenceDoesNotReconsultAlgorithmOrApplyRetryValidation) {
+    // While a row-8 oversized-movement sequence is mid-flight, prepareNextSequence() -- and thus
+    // the row-3/4 retry loop -- must not run again: only the very first of these 3 chunks comes
+    // from an algorithm call at all, proven by the Times(1) below spanning all 3 step() calls.
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{50.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]},
+             Position3D{}, Position3D{100.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]},
+             Position3D{}, Position3D{150.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    MappingStepCommand command;
+    command.movement = advanceCommand(150.0 * isq::length[cm]); // droneConfig() max_advance=50cm -> 3 chunks
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    InSequence seq;
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+
+    EXPECT_EQ(control_.step().status, DroneStepStatus::Continue);
+    EXPECT_EQ(control_.step().status, DroneStepStatus::Continue);
+    EXPECT_EQ(control_.step().status, DroneStepStatus::Continue);
+}
+
+// --- Optional Common-Issues row 6: empty LiDAR scan retries ---------------------------------
+//
+// "The LiDAR returns an empty vector" -> retry only the scan itself (same requested orientation),
+// up to kMaxLidarScanAttempts (3) total lidar_.scan() calls, before giving up. Never re-dispatches
+// the movement that may have preceded the scan, and never re-consults the Algorithm -- both of
+// those happen at most once per step(), same as before this row existed. Only applies when a scan
+// was actually requested; "no scan requested" is never treated as a LiDAR failure (proven
+// implicitly by every other test in this file that requests no scan and never throws).
+
+TEST_F(DroneControl, EmptyThenNonEmptyLidarScanSucceedsOnRetry) {
+    const Orientation orientation{20.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]};
+    MappingStepCommand command;
+    command.scan_orientation = orientation;
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(lidar_, scan(OrientationEq(orientation)))
+        .WillOnce(Return(LidarScanResult{}))
+        .WillOnce(Return(nonEmptyScanResult()));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+    EXPECT_EQ(control_.state().step_index, 1u)
+        << "the rejected empty attempt must not consume a separate step";
+}
+
+TEST_F(DroneControl, ThreeEmptyLidarScansInARowThrows) {
+    // Also proves the Phase-2B scan/map-processing exception catches (see the
+    // LidarScanThrowing.../ApplyToMapThrowing... tests below) do not swallow this throw: no
+    // exception is involved here (every attempt returns normally, just empty), and it must still
+    // propagate all the way out of step() as std::runtime_error.
+    MappingStepCommand command;
+    command.scan_orientation = Orientation{};
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(lidar_, scan(_)).Times(3).WillRepeatedly(Return(LidarScanResult{}));
+
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
+    EXPECT_EQ(control_.state().step_index, 0u)
+        << "no attempt -- rejected or otherwise -- may consume a step before the throw";
+}
+
+// --- Phase 2B fix 1: scan/map-processing exceptions in DroneControlImpl::step() ------------
+//
+// lidar_.scan() and ScanResultToVoxels::applyToMap() (map access/atVoxel/set) can throw for
+// reasons unrelated to Row 6's "empty vector" case -- e.g. the underlying map itself faulting.
+// Each is now caught locally and reported as DroneStepStatus::Error, exactly like the existing
+// movement-exception path: step_index_ is never incremented and latest_scan_ is never touched
+// (never overwritten by a scan that only partially succeeded or never applied). Row 6's own
+// exhaustion throw (proven above) is untouched -- these new catches are scoped to only the
+// lidar_.scan() call and only the applyToMap() call, never wrapping the empty-result retry loop
+// itself.
+
+TEST_F(DroneControl, LidarScanThrowingReturnsErrorWithoutUpdatingStepIndexOrLatestScan) {
+    LidarHit hit;
+    hit.distance = 10.0 * isq::length[cm];
+    const LidarScanResult previous_scan{hit};
+
+    MappingStepCommand scanning_command;
+    scanning_command.scan_orientation = Orientation{};
+
+    auto isNullScan = [](const LidarScanResult* scan) { return scan == nullptr; };
+    auto isSingleHitScan = [](const LidarScanResult* scan) { return scan != nullptr && scan->size() == 1; };
+
+    InSequence seq;
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isNullScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(previous_scan));
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isSingleHitScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce([]() -> LidarScanResult {
+        throw std::runtime_error("lidar hardware fault");
+    });
+
+    (void)control_.step(); // step 1: scans successfully, stores previous_scan
+    ASSERT_EQ(control_.state().step_index, 1u);
+
+    const DroneStepResult result = control_.step(); // step 2: lidar_.scan throws
+    EXPECT_EQ(result.status, DroneStepStatus::Error);
+    EXPECT_EQ(result.message, "lidar hardware fault");
+    EXPECT_EQ(control_.state().step_index, 1u)
+        << "step_index_ must not advance for a step whose scan threw";
+
+    // step 3: the Algorithm must still see step 1's scan, proving latest_scan_ was never touched
+    // by the throwing attempt.
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isSingleHitScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
+    (void)control_.step();
+}
+
+TEST_F(DroneControl, ApplyToMapThrowingReturnsErrorWithoutUpdatingStepIndexOrLatestScan) {
+    LidarHit hit;
+    hit.distance = 10.0 * isq::length[cm];
+    const LidarScanResult previous_scan{hit};
+
+    MappingStepCommand scanning_command;
+    scanning_command.scan_orientation = Orientation{};
+
+    auto isNullScan = [](const LidarScanResult* scan) { return scan == nullptr; };
+    auto isSingleHitScan = [](const LidarScanResult* scan) { return scan != nullptr && scan->size() == 1; };
+
+    // output_map_.isInBounds() is also called unconditionally at the top of every step() (row
+    // 11), so it can't be scoped to only step 2's applyToMap call without disturbing row 11.
+    // applyToMap's own next map access, output_map_.getMapConfig().resolution, is called exactly
+    // once per applyToMap invocation and nowhere else for a scan-only (no movement) command --
+    // throwing on exactly the 2nd call reproduces a map-access failure inside step 2's
+    // applyToMap without disturbing step 1's (or step 3's) successful map write.
+    auto call_count = std::make_shared<int>(0);
+    ON_CALL(output_map_, getMapConfig()).WillByDefault(Invoke([call_count]() -> MapConfig {
+        ++*call_count;
+        if (*call_count == 2) {
+            throw std::runtime_error("map access fault");
+        }
+        return unboundedMapConfig();
+    }));
+
+    InSequence seq;
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isNullScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(previous_scan));
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isSingleHitScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
+
+    (void)control_.step(); // step 1: scans and maps successfully, stores previous_scan
+    ASSERT_EQ(control_.state().step_index, 1u);
+
+    const DroneStepResult result = control_.step(); // step 2: applyToMap throws
+    EXPECT_EQ(result.status, DroneStepStatus::Error);
+    EXPECT_EQ(result.message, "map access fault");
+    EXPECT_EQ(control_.state().step_index, 1u)
+        << "step_index_ must not advance for a step whose map write threw";
+
+    // step 3: the Algorithm must still see step 1's scan, proving latest_scan_ was never
+    // overwritten by the throwing attempt's scan, even though lidar_.scan() itself had already
+    // succeeded before applyToMap threw.
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isSingleHitScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Return(nonEmptyScanResult()));
+    (void)control_.step();
+}
+
+TEST_F(DroneControl, LidarScanExceptionDuringRetryLoopIsNotCountedAsRow6EmptyAttempt) {
+    // A thrown exception on any retry attempt returns Error immediately -- it is never treated as
+    // one of Row 6's "empty result" attempts, and the retry loop never continues past it: exactly
+    // 2 lidar_.scan() calls happen here (empty, then throw), never a 3rd that Row 6's own
+    // exhaustion would need.
+    MappingStepCommand command;
+    command.scan_orientation = Orientation{};
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(lidar_, scan(_))
+        .WillOnce(Return(LidarScanResult{})) // rejected: empty (row 6, attempt 1)
+        .WillOnce([]() -> LidarScanResult { throw std::runtime_error("lidar hardware fault"); });
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Error);
+    EXPECT_EQ(result.message, "lidar hardware fault");
+}
+
+TEST_F(DroneControl, MovementExecutesOnlyOnceWhileLidarScanRetries) {
+    // Movement + scan requested together: the movement must be dispatched exactly once even
+    // though the scan that follows it needs two attempts to succeed.
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{10.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    MappingStepCommand command;
+    command.movement = advanceCommand(10.0 * isq::length[cm]);
+    command.scan_orientation = Orientation{};
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
+        .Times(1)
+        .WillOnce(Return(MovementResult{true, ""}));
+    EXPECT_CALL(lidar_, scan(_))
+        .WillOnce(Return(LidarScanResult{}))
+        .WillOnce(Return(nonEmptyScanResult()));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, AlgorithmCalledOnlyOnceDuringLidarScanRetries) {
+    MappingStepCommand command;
+    command.scan_orientation = Orientation{};
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(lidar_, scan(_))
+        .WillOnce(Return(LidarScanResult{}))
+        .WillOnce(Return(LidarScanResult{}))
+        .WillOnce(Return(nonEmptyScanResult()));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue)
+        << "the 3rd attempt succeeding, after 2 rejected empties, also proves the shared "
+           "kMaxLidarScanAttempts budget allows a final-attempt success";
+}
+
+TEST_F(DroneControl, SuccessfulRetryScanIsMappedAndStoredAsLatestScan) {
+    // Proves it's specifically the *accepted retry's* scan -- not the rejected empty one -- that
+    // gets applied to output_map_ and stored as latest_scan_: the next step()'s Algorithm call
+    // must see exactly this scan's content as latest_scan.
+    LidarHit hit;
+    hit.distance = 42.0 * isq::length[cm];
+    const LidarScanResult retry_scan{hit};
+
+    MappingStepCommand scanning_command;
+    scanning_command.scan_orientation = Orientation{};
+
+    MappingStepCommand idle_command;
+    idle_command.movement = hoverCommand();
+
+    EXPECT_CALL(lidar_, scan(_))
+        .WillOnce(Return(LidarScanResult{})) // rejected: empty
+        .WillOnce(Return(retry_scan));       // accepted: the retry
+
+    auto isNullScan = [](const LidarScanResult* scan) { return scan == nullptr; };
+    auto isRetryScan = [](const LidarScanResult* scan) {
+        return scan != nullptr && scan->size() == 1 &&
+               scan->front().distance == 42.0 * isq::length[cm];
+    };
+
+    InSequence seq;
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isNullScan))).WillOnce(Return(scanning_command));
+    EXPECT_CALL(algorithm_, nextStep(_, Truly(isRetryScan))).WillOnce(Return(idle_command));
+
+    (void)control_.step(); // step 1: empty scan rejected, retry succeeds and is stored
+    (void)control_.step(); // step 2: the Algorithm must see the retry's scan, not the empty one
+}
+
+// --- Optional Common-Issues row 7: movement driver returns false -----------------------------
+//
+// "The movement driver returns false" -> retry the exact same already-prepared chunk (post row-10
+// amendment, post row-8 splitting) up to kMaxMovementAttempts (3) total driver calls, all within
+// the same step() call, before giving up. Never re-consults the Algorithm, never advances to a
+// later pending row-8 chunk, and never touches internal_position_/step_index_/scan state for a
+// failed attempt -- only a genuinely successful attempt falls through to row 12 and the scan
+// block. Exhausting the budget throws std::runtime_error (not an Error DroneStepResult). A thrown
+// exception is a distinct, non-retried failure mode (see
+// MovementExceptionReturnsErrorWithoutScanningOrAdvancingStepIndex above). Hover never calls
+// movement_ at all, so it is unaffected by any of this.
+
+TEST_F(DroneControl, FalseThenSuccessRetriesSameMovementOnceAndSucceeds) {
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{10.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    MappingStepCommand command;
+    command.movement = advanceCommand(10.0 * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
+        .WillOnce(Return(MovementResult{false, "blocked"}))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+    EXPECT_EQ(control_.state().step_index, 1u)
+        << "the rejected attempt must not consume a separate step -- only the eventual success "
+           "does";
+}
+
+TEST_F(DroneControl, FalseFalseSuccessSucceedsOnThirdAttempt) {
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{10.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    MappingStepCommand command;
+    command.movement = advanceCommand(10.0 * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
+        .WillOnce(Return(MovementResult{false, "blocked"}))
+        .WillOnce(Return(MovementResult{false, "blocked again"}))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue)
+        << "the 3rd attempt succeeding, after 2 rejected false results, proves the retry budget "
+           "allows a final-attempt success";
+}
+
+TEST_F(DroneControl, FalseThreeTimesThrows) {
+    MappingStepCommand command;
+    command.movement = advanceCommand(10.0 * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
+        .Times(3)
+        .WillRepeatedly(Return(MovementResult{false, "blocked"}));
+    EXPECT_CALL(lidar_, scan(_)).Times(0);
+
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
+    EXPECT_EQ(control_.state().step_index, 0u)
+        << "no attempt -- rejected or otherwise -- may consume a step before the throw";
+}
+
+TEST_F(DroneControl, AlgorithmCalledOnlyOnceDuringMovementRetries) {
+    MappingStepCommand command;
+    command.movement = rotateCommand(10.0 * horizontal_angle[deg]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, rotate(RotationDirection::Left, 10.0 * horizontal_angle[deg]))
+        .WillOnce(Return(MovementResult{false, "servo jammed"}))
+        .WillOnce(Return(MovementResult{false, "servo jammed again"}))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue)
+        << "3 driver attempts against a single Algorithm-issued command, while nextStep's "
+           "Times(1) above still holds, is the proof the Algorithm is never re-consulted during "
+           "row-7 retries";
+}
+
+TEST_F(DroneControl, ScanHappensOnlyOnceAndOnlyAfterEventualMovementSuccess) {
+    ON_CALL(gps_, position())
+        .WillByDefault(Invoke(gpsPositionSequence(
+            {Position3D{}, Position3D{10.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}})));
+
+    MappingStepCommand command;
+    command.movement = advanceCommand(10.0 * isq::length[cm]);
+    command.scan_orientation = Orientation{};
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    InSequence seq;
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm])).WillOnce(Return(MovementResult{false, "blocked"}));
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm])).WillOnce(Return(MovementResult{true, ""}));
+    EXPECT_CALL(lidar_, scan(_)).Times(1).WillOnce(Return(nonEmptyScanResult()));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, Row12ValidationOccursOnlyAfterSuccessfulMovementNotAfterFalseAttempts) {
+    MappingStepCommand command;
+    command.movement = advanceCommand(10.0 * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    EXPECT_CALL(movement_, advance(10.0 * isq::length[cm]))
+        .WillOnce(Return(MovementResult{false, "blocked"}))
+        .WillOnce(Return(MovementResult{false, "blocked again"}))
+        .WillOnce(Return(MovementResult{true, ""}));
+
+    // Exactly 2 gps_.position() reads total: the pre-step (row 11) read, and the post-movement
+    // (row 12) read after the eventual success -- none at all for the two rejected false
+    // attempts in between.
+    EXPECT_CALL(gps_, position())
+        .Times(2)
+        .WillOnce(Return(Position3D{}))
+        .WillOnce(Return(Position3D{10.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]}));
+    EXPECT_CALL(gps_, heading()).WillRepeatedly(Return(Orientation{}));
+
+    const DroneStepResult result = control_.step();
+    EXPECT_EQ(result.status, DroneStepStatus::Continue);
+}
+
+TEST_F(DroneControl, MidRow8ChunkRetriesSameChunkAndPreservesLaterChunks) {
+    // droneConfig() max_advance=50cm; 150cm requested -> 3 chunks of 50cm. Chunk 2 fails once
+    // before succeeding on retry -- the SAME 50cm chunk, dispatched again within the same
+    // step() call -- and chunk 3 (the still-pending remainder) is then dispatched normally on
+    // the next step() call, exactly as if chunk 2 had never failed.
+    //
+    // This test also calls control_.state() between step()s (each of which itself reads
+    // gps_.position()), so a fixed pre-computed sequence of readings (as used elsewhere in this
+    // file) would be thrown out of alignment by those extra calls. Instead, gps_.position()
+    // always reports a `cumulative_x_cm` that a successful movement_.advance() action keeps up
+    // to date -- correct regardless of how many extra times either mock gets called, and
+    // correctly left unchanged by the rejected false attempt.
+    auto cumulative_x_cm = std::make_shared<double>(0.0);
+    ON_CALL(gps_, position()).WillByDefault(Invoke([cumulative_x_cm]() {
+        return Position3D{*cumulative_x_cm * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]};
+    }));
+    auto advanceAndSucceed = [cumulative_x_cm](PhysicalLength distance) {
+        *cumulative_x_cm += distance.force_numerical_value_in(cm);
+        return MovementResult{true, ""};
+    };
+
+    MappingStepCommand command;
+    command.movement = advanceCommand(150.0 * isq::length[cm]);
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(1).WillOnce(Return(command));
+
+    InSequence seq;
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Invoke(advanceAndSucceed)); // chunk 1
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm]))
+        .WillOnce(Return(MovementResult{false, "blocked"})); // chunk 2, attempt 1: no position change
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm]))
+        .WillOnce(Invoke(advanceAndSucceed)); // chunk 2, attempt 2
+    EXPECT_CALL(movement_, advance(50.0 * isq::length[cm])).WillOnce(Invoke(advanceAndSucceed)); // chunk 3
+
+    EXPECT_EQ(control_.step().status, DroneStepStatus::Continue); // chunk 1
+    EXPECT_EQ(control_.state().step_index, 1u);
+    EXPECT_EQ(control_.step().status, DroneStepStatus::Continue)  // chunk 2 (retried once, still one step)
+        << "the retry happens within this single step() call, not as an extra step";
+    EXPECT_EQ(control_.state().step_index, 2u);
+    EXPECT_EQ(control_.step().status, DroneStepStatus::Continue); // chunk 3, unaffected by chunk 2's retry
+    EXPECT_EQ(control_.state().step_index, 3u);
 }

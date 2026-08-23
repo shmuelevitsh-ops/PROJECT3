@@ -421,10 +421,17 @@ TEST(Internal, MockAlgorithmAlwaysHoveringHitsMaxSteps) {
     MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
 
+    // An explicit Hover (rather than a bare default-constructed command with no movement at
+    // all) so this stays a legitimate "hovering" Working step rather than a faulty NOOP
+    // (Optional Common-Issues row 4).
+    MappingStepCommand hover_command;
+    hover_command.movement = MovementCommand{};
+    hover_command.movement->type = MovementCommandType::Hover;
+
     ::testing::NiceMock<test::GMockIMappingAlgorithm> algorithm(
         MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
     ON_CALL(algorithm, nextStep(::testing::_, ::testing::_))
-        .WillByDefault(::testing::Return(MappingStepCommand{}));
+        .WillByDefault(::testing::Return(hover_command));
 
     const std::filesystem::path output_file = scratchDir() / "mock_algorithm_hover.npy";
     MissionControlImpl mission_control(MissionControlDependencies{

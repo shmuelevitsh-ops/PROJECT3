@@ -3,6 +3,7 @@
 #include <MissionControl/DroneControlImpl.h>
 #include <Common/MissionControlRegistration.h>
 
+#include <exception>
 #include <iostream>
 #include <utility>
 
@@ -58,7 +59,15 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
         errors.push_back(common_types::ErrorRef{"DRONE_CONTROL_ERROR", result.message});
     }
 
-    output_map_.save(output_map_file_);
+    // The mission's outcome (status/steps/errors) is already fully determined at this point;
+    // output_map_.save() failing must not erase it by propagating out of runMission() -- it is
+    // reported as an additional error instead, leaving status/steps/errors otherwise untouched.
+    try {
+        output_map_.save(output_map_file_);
+    } catch (const std::exception& e) {
+        std::cerr << "MissionControlImpl::runMission: failed to save output map: " << e.what() << '\n';
+        errors.push_back(common_types::ErrorRef{"OUTPUT_MAP_SAVE_FAILED", e.what()});
+    }
     return common_types::MissionRunResult{status, steps, errors};
 }
 

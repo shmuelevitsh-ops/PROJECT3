@@ -1,7 +1,7 @@
 comparative_report:
   composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/test_inputs/compositions/composition_full_house.yaml
   mission_control_folder: tests/integration/test_output/mission_control_libs/real_benchmark_house_full_flow
-  generated_at_utc: 2026-08-23T13:59:07Z
+  generated_at_utc: 2026-08-23T17:10:08Z
   results_summary:
     - same_results:
         - MissionControl_322889890_315113738.so
