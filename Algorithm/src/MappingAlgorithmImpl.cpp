@@ -124,18 +124,18 @@ struct MovementPlan {
 [[nodiscard]] VoxelIndex toVoxelIndex(const Position3D& pos, const common_types::MapConfig& config) {
     const double resolution_cm = numCm(config.resolution);
     return VoxelIndex{
-        static_cast<long>(std::floor((pos.x - config.offset.x).force_numerical_value_in(cm) / resolution_cm)),
-        static_cast<long>(std::floor((pos.y - config.offset.y).force_numerical_value_in(cm) / resolution_cm)),
-        static_cast<long>(std::floor((pos.z - config.offset.z).force_numerical_value_in(cm) / resolution_cm)),
+        static_cast<long>(std::floor((pos.x + config.offset.x).force_numerical_value_in(cm) / resolution_cm)),
+        static_cast<long>(std::floor((pos.y + config.offset.y).force_numerical_value_in(cm) / resolution_cm)),
+        static_cast<long>(std::floor((pos.z + config.offset.z).force_numerical_value_in(cm) / resolution_cm)),
     };
 }
 
 [[nodiscard]] Position3D toWorldCenter(const VoxelIndex& idx, const common_types::MapConfig& config) {
     const double resolution_cm = numCm(config.resolution);
     return Position3D{
-        config.offset.x + (static_cast<double>(idx.ix) + 0.5) * resolution_cm * x_extent[cm],
-        config.offset.y + (static_cast<double>(idx.iy) + 0.5) * resolution_cm * y_extent[cm],
-        config.offset.z + (static_cast<double>(idx.iz) + 0.5) * resolution_cm * z_extent[cm],
+        (static_cast<double>(idx.ix) + 0.5) * resolution_cm * x_extent[cm] - config.offset.x,
+        (static_cast<double>(idx.iy) + 0.5) * resolution_cm * y_extent[cm] - config.offset.y,
+        (static_cast<double>(idx.iz) + 0.5) * resolution_cm * z_extent[cm] - config.offset.z,
     };
 }
 
@@ -145,18 +145,18 @@ struct MovementPlan {
 [[nodiscard]] Position3D voxelMinCorner(const VoxelIndex& idx, const common_types::MapConfig& config) {
     const double resolution_cm = numCm(config.resolution);
     return Position3D{
-        config.offset.x + static_cast<double>(idx.ix) * resolution_cm * x_extent[cm],
-        config.offset.y + static_cast<double>(idx.iy) * resolution_cm * y_extent[cm],
-        config.offset.z + static_cast<double>(idx.iz) * resolution_cm * z_extent[cm],
+        static_cast<double>(idx.ix) * resolution_cm * x_extent[cm] - config.offset.x,
+        static_cast<double>(idx.iy) * resolution_cm * y_extent[cm] - config.offset.y,
+        static_cast<double>(idx.iz) * resolution_cm * z_extent[cm] - config.offset.z,
     };
 }
 
 [[nodiscard]] Position3D voxelMaxCorner(const VoxelIndex& idx, const common_types::MapConfig& config) {
     const double resolution_cm = numCm(config.resolution);
     return Position3D{
-        config.offset.x + (static_cast<double>(idx.ix) + 1.0) * resolution_cm * x_extent[cm],
-        config.offset.y + (static_cast<double>(idx.iy) + 1.0) * resolution_cm * y_extent[cm],
-        config.offset.z + (static_cast<double>(idx.iz) + 1.0) * resolution_cm * z_extent[cm],
+        (static_cast<double>(idx.ix) + 1.0) * resolution_cm * x_extent[cm] - config.offset.x,
+        (static_cast<double>(idx.iy) + 1.0) * resolution_cm * y_extent[cm] - config.offset.y,
+        (static_cast<double>(idx.iz) + 1.0) * resolution_cm * z_extent[cm] - config.offset.z,
     };
 }
 

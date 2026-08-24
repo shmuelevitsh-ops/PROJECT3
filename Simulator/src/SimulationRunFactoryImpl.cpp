@@ -37,9 +37,9 @@ common::types::MapConfig hiddenMapConfig(const types::SimulationConfigData& simu
 
     return common::types::MapConfig{
         common::types::MappingBounds{
-            simulation.map_offset.x, simulation.map_offset.x + extent_x_voxels * resolution_cm * common::x_extent[common::cm],
-            simulation.map_offset.y, simulation.map_offset.y + extent_y_voxels * resolution_cm * common::y_extent[common::cm],
-            simulation.map_offset.z, simulation.map_offset.z + extent_z_voxels * resolution_cm * common::z_extent[common::cm]},
+            -simulation.map_offset.x, extent_x_voxels * resolution_cm * common::x_extent[common::cm] - simulation.map_offset.x,
+            -simulation.map_offset.y, extent_y_voxels * resolution_cm * common::y_extent[common::cm] - simulation.map_offset.y,
+            -simulation.map_offset.z, extent_z_voxels * resolution_cm * common::z_extent[common::cm] - simulation.map_offset.z},
         simulation.map_offset,
         simulation.map_resolution};
 }

@@ -37,7 +37,7 @@ constexpr std::size_t kNumAxes = 3;
 using VoxelIndex = std::array<long, kNumAxes>;
 
 // Converts a world position into voxel indices using the formula:
-//   idx = floor((world_coordinate - offset) / resolution)
+//   idx = floor((world_coordinate + offset) / resolution)
 // Returns std::nullopt if the map has no usable resolution (e.g. a default
 // MapConfig), since indices cannot be derived in that case.
 [[nodiscard]] std::optional<VoxelIndex> computeIndex(const Position3D& pos,
@@ -47,9 +47,9 @@ using VoxelIndex = std::array<long, kNumAxes>;
         return std::nullopt;
     }
 
-    const double rel_x = (pos.x - config.offset.x).force_numerical_value_in(cm);
-    const double rel_y = (pos.y - config.offset.y).force_numerical_value_in(cm);
-    const double rel_z = (pos.z - config.offset.z).force_numerical_value_in(cm);
+    const double rel_x = (pos.x + config.offset.x).force_numerical_value_in(cm);
+    const double rel_y = (pos.y + config.offset.y).force_numerical_value_in(cm);
+    const double rel_z = (pos.z + config.offset.z).force_numerical_value_in(cm);
 
     return VoxelIndex{
         static_cast<long>(std::floor(rel_x / resolution_cm)),
@@ -184,9 +184,9 @@ void allocateFreshMap(std::shared_ptr<NpyArray>& map_ptr, const types::MapConfig
     if (resolution_cm > 0.0) {
         const auto& bounds = config.boundaries;
         const auto& offset = config.offset;
-        nx = axisVoxelCount((bounds.max_x - offset.x).force_numerical_value_in(cm), resolution_cm);
-        ny = axisVoxelCount((bounds.max_y - offset.y).force_numerical_value_in(cm), resolution_cm);
-        nz = axisVoxelCount((bounds.max_height - offset.z).force_numerical_value_in(cm),
+        nx = axisVoxelCount((bounds.max_x + offset.x).force_numerical_value_in(cm), resolution_cm);
+        ny = axisVoxelCount((bounds.max_y + offset.y).force_numerical_value_in(cm), resolution_cm);
+        nz = axisVoxelCount((bounds.max_height + offset.z).force_numerical_value_in(cm),
                              resolution_cm);
     }
 
@@ -261,13 +261,13 @@ void rejectBoundariesStartingBeforeOffset(const types::MapConfig& config) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
 
     const double min_x_index =
-        std::floor((config.boundaries.min_x - config.offset.x).force_numerical_value_in(cm) /
+        std::floor((config.boundaries.min_x + config.offset.x).force_numerical_value_in(cm) /
                     resolution_cm);
     const double min_y_index =
-        std::floor((config.boundaries.min_y - config.offset.y).force_numerical_value_in(cm) /
+        std::floor((config.boundaries.min_y + config.offset.y).force_numerical_value_in(cm) /
                     resolution_cm);
     const double min_z_index =
-        std::floor((config.boundaries.min_height - config.offset.z).force_numerical_value_in(cm) /
+        std::floor((config.boundaries.min_height + config.offset.z).force_numerical_value_in(cm) /
                     resolution_cm);
 
     if (min_x_index >= 0.0 && min_y_index >= 0.0 && min_z_index >= 0.0) {
@@ -313,25 +313,30 @@ void clampBoundariesToExtent(types::MapConfig& config, const NpyArray::shape_t& 
     const double offset_y_cm = config.offset.y.force_numerical_value_in(cm);
     const double offset_z_cm = config.offset.z.force_numerical_value_in(cm);
 
-    const double extent_x_cm = offset_x_cm + resolution_cm * static_cast<double>(shape[0]);
-    const double extent_y_cm = offset_y_cm + resolution_cm * static_cast<double>(shape[1]);
-    const double extent_z_cm = offset_z_cm + resolution_cm * static_cast<double>(shape[2]);
+    // Physical (mission-relative) position of voxel index 0 and of voxel index shape[axis] --
+    // a voxel-to-position conversion, so it subtracts the offset.
+    const double map_min_x_cm = -offset_x_cm;
+    const double map_min_y_cm = -offset_y_cm;
+    const double map_min_z_cm = -offset_z_cm;
+    const double extent_x_cm = resolution_cm * static_cast<double>(shape[0]) - offset_x_cm;
+    const double extent_y_cm = resolution_cm * static_cast<double>(shape[1]) - offset_y_cm;
+    const double extent_z_cm = resolution_cm * static_cast<double>(shape[2]) - offset_z_cm;
 
     double min_x_cm = config.boundaries.min_x.force_numerical_value_in(cm);
     double max_x_cm = config.boundaries.max_x.force_numerical_value_in(cm);
-    clampAxis(min_x_cm, max_x_cm, offset_x_cm, extent_x_cm, "x");
+    clampAxis(min_x_cm, max_x_cm, map_min_x_cm, extent_x_cm, "x");
     config.boundaries.min_x = min_x_cm * x_extent[cm];
     config.boundaries.max_x = max_x_cm * x_extent[cm];
 
     double min_y_cm = config.boundaries.min_y.force_numerical_value_in(cm);
     double max_y_cm = config.boundaries.max_y.force_numerical_value_in(cm);
-    clampAxis(min_y_cm, max_y_cm, offset_y_cm, extent_y_cm, "y");
+    clampAxis(min_y_cm, max_y_cm, map_min_y_cm, extent_y_cm, "y");
     config.boundaries.min_y = min_y_cm * y_extent[cm];
     config.boundaries.max_y = max_y_cm * y_extent[cm];
 
     double min_z_cm = config.boundaries.min_height.force_numerical_value_in(cm);
     double max_z_cm = config.boundaries.max_height.force_numerical_value_in(cm);
-    clampAxis(min_z_cm, max_z_cm, offset_z_cm, extent_z_cm, "height");
+    clampAxis(min_z_cm, max_z_cm, map_min_z_cm, extent_z_cm, "height");
     config.boundaries.min_height = min_z_cm * z_extent[cm];
     config.boundaries.max_height = max_z_cm * z_extent[cm];
 }
