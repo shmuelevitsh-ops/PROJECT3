@@ -3,7 +3,7 @@
 #include <Common/IMutableMap3D.h>
 #include <Common/Types.h>
 
-namespace MissionControl_322889890_315113738 {
+namespace mission_control_322889890_315113738 {
 
 class ScanResultToVoxels {
 public:
@@ -16,4 +16,4 @@ public:
                            const common::types::LidarConfigData& lidar_config);
 };
 
-} // namespace MissionControl_322889890_315113738
+} // namespace mission_control_322889890_315113738

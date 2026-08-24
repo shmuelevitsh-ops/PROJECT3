@@ -4,7 +4,7 @@
 
 #include <memory>
 
-namespace Algorithm_322889890_315113738 {
+namespace algorithm_322889890_315113738 {
 
 class MappingAlgorithmImpl final : public common::IMappingAlgorithm {
 public:
@@ -23,4 +23,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace Algorithm_322889890_315113738
+} // namespace algorithm_322889890_315113738

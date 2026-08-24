@@ -7,7 +7,7 @@
 #include <iostream>
 #include <utility>
 
-namespace MissionControl_322889890_315113738 {
+namespace mission_control_322889890_315113738 {
 
 namespace common_types = common::types;
 
@@ -73,4 +73,4 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
 
 REGISTER_MISSION_CONTROL(MissionControlImpl);
 
-} // namespace MissionControl_322889890_315113738
+} // namespace mission_control_322889890_315113738

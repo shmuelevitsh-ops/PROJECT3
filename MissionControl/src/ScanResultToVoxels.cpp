@@ -4,7 +4,7 @@
 
 #include <limits>
 
-namespace MissionControl_322889890_315113738 {
+namespace mission_control_322889890_315113738 {
 
 namespace common_types = common::types;
 namespace mp = common::mp;
@@ -187,4 +187,4 @@ void ScanResultToVoxels::applyToMap(
     }
 }
 
-} // namespace MissionControl_322889890_315113738
+} // namespace mission_control_322889890_315113738

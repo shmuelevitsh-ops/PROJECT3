@@ -24,7 +24,7 @@
 
 using namespace common;
 using namespace common::types;
-using namespace Algorithm_322889890_315113738;
+using namespace algorithm_322889890_315113738;
 using simulator::Map3DImpl;
 
 namespace {

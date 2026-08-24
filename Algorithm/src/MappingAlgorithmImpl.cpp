@@ -17,7 +17,7 @@
 #include <vector>
 #include <utility>
 
-namespace Algorithm_322889890_315113738 {
+namespace algorithm_322889890_315113738 {
 
 namespace common_types = common::types;
 
@@ -942,4 +942,4 @@ common_types::MappingStepCommand MappingAlgorithmImpl::nextStep(const common_typ
 
 REGISTER_MAPPING_ALGORITHM(MappingAlgorithmImpl);
 
-} // namespace Algorithm_322889890_315113738
+} // namespace algorithm_322889890_315113738

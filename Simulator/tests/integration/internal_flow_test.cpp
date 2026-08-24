@@ -49,8 +49,8 @@ using namespace common;
 using namespace common::types;
 using namespace simulator;
 using namespace simulator::types;
-using namespace MissionControl_322889890_315113738;
-using namespace Algorithm_322889890_315113738;
+using namespace mission_control_322889890_315113738;
+using namespace algorithm_322889890_315113738;
 
 namespace {
 

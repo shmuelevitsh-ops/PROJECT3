@@ -17,7 +17,7 @@
 
 using namespace common;
 using namespace common::types;
-using namespace MissionControl_322889890_315113738;
+using namespace mission_control_322889890_315113738;
 using simulator::Map3DImpl;
 
 namespace {

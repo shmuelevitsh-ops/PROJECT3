@@ -11,7 +11,7 @@
 #include <deque>
 #include <optional>
 
-namespace MissionControl_322889890_315113738 {
+namespace mission_control_322889890_315113738 {
 
 class DroneControlImpl final : public mission_control::IDroneControl {
 public:
@@ -86,4 +86,4 @@ private:
     std::optional<common::Position3D> internal_position_;
 };
 
-} // namespace MissionControl_322889890_315113738
+} // namespace mission_control_322889890_315113738

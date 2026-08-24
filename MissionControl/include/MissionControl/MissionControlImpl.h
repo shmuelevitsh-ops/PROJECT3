@@ -9,7 +9,7 @@
 #include <filesystem>
 #include <memory>
 
-namespace MissionControl_322889890_315113738 {
+namespace mission_control_322889890_315113738 {
 
 class MissionControlImpl final : public common::IMissionControl {
 public:
@@ -25,4 +25,4 @@ private:
     bool verbose_ = false;
 };
 
-} // namespace MissionControl_322889890_315113738
+} // namespace mission_control_322889890_315113738

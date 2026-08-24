@@ -35,7 +35,7 @@
 
 using namespace common;
 using namespace common::types;
-using namespace MissionControl_322889890_315113738;
+using namespace mission_control_322889890_315113738;
 using ::testing::_;
 using ::testing::Eq;
 using ::testing::Invoke;
@@ -99,30 +99,26 @@ MappingStepCommand unmappableVoxelsCommand() {
     return command;
 }
 
-// A movement command whose mocked IDroneMovement::advance() call (set up by the caller, via
+// A scan-only command whose mocked ILidar::scan() call (set up by the caller, via
 // Throw(std::runtime_error(...)) -- see the file's using-declarations) throws, driving
-// DroneControlImpl::step() to DroneStepStatus::Error with that message -- the only way to reach
-// Error now that IDroneControl is no longer injected directly. A *returned* success=false is no
-// longer the right fixture for this: Optional Common-Issues row 7 retries it up to 3 times
-// against the same chunk before giving up, and even then throws rather than returning Error, so
-// these Row-9 (Error-is-non-terminal) tests script a movement exception instead, exactly like a
-// real MockMovement wall collision -- a distinct, still-immediate, still-unretried Error path.
-MappingStepCommand advanceCommand() {
+// DroneControlImpl::step() to a *returned* DroneStepStatus::Error with that message. A movement
+// exception is no longer a fit for these Row-9 (Error-is-non-terminal) tests: a real wall
+// collision is now a fatal simulation-run failure that propagates out of step() unchanged, not a
+// DroneStepStatus::Error MissionControl can log and continue past. lidar_.scan() throwing (e.g.
+// its own map access failing) is a genuine, still-immediate, still-unretried returned-Error path
+// instead.
+MappingStepCommand scanCommand() {
     MappingStepCommand command;
-    MovementCommand movement;
-    movement.type = MovementCommandType::Advance;
-    movement.distance = 10.0 * isq::length[cm];
-    command.movement = movement;
+    command.scan_orientation = Orientation{};
     return command;
 }
 
 // Generous, effectively unbounded map used as the fixture's default MapConfig. Without it, an
 // unstubbed output_map_.getMapConfig() would return a default-constructed MapConfig (all-zero
-// boundaries), which DroneControlImpl's out-of-bounds handling would treat as "already at the
-// boundary" -- silently dropping every Advance/Elevate command in advanceCommand() below before
-// it ever reaches the scripted movement_ mock. Tests here only script IDroneMovement outcomes;
-// none of them mean to exercise out-of-bounds handling itself, so the bounds just need to be wide
-// enough to never bind.
+// boundaries), which DroneControlImpl's out-of-bounds handling (Optional Common-Issues row 11)
+// would treat the fixture's default (0,0,0) GPS reading as already out of bounds. Tests here only
+// script IMappingAlgorithm/ILidar/IDroneMovement outcomes; none of them mean to exercise
+// out-of-bounds handling itself, so the bounds just need to be wide enough to never bind.
 MapConfig unboundedMapConfig() {
     MapConfig config;
     config.boundaries = MappingBounds{
@@ -195,9 +191,9 @@ TEST_F(MissionControl, ErrorStatusIsLoggedAndMissionContinuesToCompleted) {
     // MissionControl level -- it is logged/recorded, but the mission loop keeps going and a
     // later Completed still resolves the run as Completed.
     EXPECT_CALL(algorithm_, nextStep(_, _))
-        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(scanCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
@@ -213,10 +209,10 @@ TEST_F(MissionControl, ErrorThenContinueThenCompletedRunsAllThreeSteps) {
     // Confirms MissionControl genuinely resumes the loop after an Error -- not just that it
     // tolerates one immediately followed by a terminal Completed.
     EXPECT_CALL(algorithm_, nextStep(_, _))
-        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(scanCommand()))
         .WillOnce(Return(workingCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();
@@ -229,10 +225,10 @@ TEST_F(MissionControl, ErrorThenContinueThenCompletedRunsAllThreeSteps) {
 
 TEST_F(MissionControl, MultipleErrorsAreAllRetainedInOrderBeforeCompleted) {
     EXPECT_CALL(algorithm_, nextStep(_, _))
-        .WillOnce(Return(advanceCommand()))
-        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(scanCommand()))
+        .WillOnce(Return(scanCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_))
+    EXPECT_CALL(lidar_, scan(_))
         .WillOnce(Throw(std::runtime_error("first obstacle")))
         .WillOnce(Throw(std::runtime_error("second obstacle")));
 
@@ -251,8 +247,8 @@ TEST_F(MissionControl, ErrorsUntilMaxStepsReportsMaxStepsNotError) {
     // final status must be MaxSteps (never Error), with one step() call per max_steps and every
     // error retained.
     constexpr std::size_t kMaxSteps = 3;
-    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(kMaxSteps).WillRepeatedly(Return(advanceCommand()));
-    EXPECT_CALL(movement_, advance(_)).Times(kMaxSteps).WillRepeatedly(Throw(std::runtime_error("blocked")));
+    EXPECT_CALL(algorithm_, nextStep(_, _)).Times(kMaxSteps).WillRepeatedly(Return(scanCommand()));
+    EXPECT_CALL(lidar_, scan(_)).Times(kMaxSteps).WillRepeatedly(Throw(std::runtime_error("blocked")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(kMaxSteps);
     const MissionRunResult result = mission_control->runMission();
@@ -266,8 +262,8 @@ TEST_F(MissionControl, ErrorOnFinalAvailableStepReportsMaxStepsAndRetainsError) 
     constexpr std::size_t kMaxSteps = 2;
     EXPECT_CALL(algorithm_, nextStep(_, _))
         .WillOnce(Return(workingCommand()))
-        .WillOnce(Return(advanceCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked at the end")));
+        .WillOnce(Return(scanCommand()));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Throw(std::runtime_error("blocked at the end")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(kMaxSteps);
     const MissionRunResult result = mission_control->runMission();
@@ -289,9 +285,9 @@ TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenCompleted) {
 TEST_F(MissionControl, OutputMapSavedExactlyOnceWhenErrorOccursThenCompletes) {
     // A recoverable DroneStepStatus::Error must not disturb the normal final output handling.
     EXPECT_CALL(algorithm_, nextStep(_, _))
-        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(scanCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
     EXPECT_CALL(output_map_, save(_)).Times(1);
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
@@ -377,9 +373,9 @@ TEST_F(MissionControl, ErrorStatusReportsStepCountAndDroneControlErrorCode) {
     // an immediate Error must still report steps == 1 for that attempt, not 0) are separate
     // output-contract details that a bug could get wrong independently of the message.
     EXPECT_CALL(algorithm_, nextStep(_, _))
-        .WillOnce(Return(advanceCommand()))
+        .WillOnce(Return(scanCommand()))
         .WillOnce(Return(finishedCommand()));
-    EXPECT_CALL(movement_, advance(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
 
     const std::unique_ptr<MissionControlImpl> mission_control = makeMissionControl(10);
     const MissionRunResult result = mission_control->runMission();

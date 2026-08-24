@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace MissionControl_322889890_315113738 {
+namespace mission_control_322889890_315113738 {
 
 namespace common_types = common::types;
 
@@ -478,12 +478,10 @@ common_types::DroneStepResult DroneControlImpl::step() {
     }
 
     // Movement is executed before any scan, per MappingStepCommand's contract. A thrown exception
-    // (e.g. MockMovement rejecting a real wall collision it alone can see) is caught narrowly
-    // here, without touching the scan block below, and is never retried (Optional Common-Issues
-    // row 7 covers only a returned success=false, not an exception) -- it is reported immediately,
-    // and, as before, never reaches lidar_.scan() or increments step_index_. Any remaining chunks
-    // of this sequence are discarded: the whole original command is being reported as failed, so
-    // there is no partial sequence left to resume.
+    // (e.g. MockMovement rejecting a real wall collision it alone can see) is a fatal simulation-
+    // run failure, not a recoverable step outcome: it is left to propagate out of step() unchanged
+    // -- never caught here, never converted into a DroneStepStatus::Error, and never retried
+    // (Optional Common-Issues row 7 covers only a returned success=false, not an exception).
     if (movement_to_dispatch) {
         const common_types::MovementCommand& movement = *movement_to_dispatch;
         common_types::MovementResult result{};
@@ -498,24 +496,18 @@ common_types::DroneStepResult DroneControlImpl::step() {
         // first iteration.
         bool movement_succeeded = false;
         for (int attempt = 0; attempt < kMaxMovementAttempts; ++attempt) {
-            try {
-                switch (movement.type) {
-                    case common_types::MovementCommandType::Hover:
-                        break;
-                    case common_types::MovementCommandType::Rotate:
-                        result = movement_.rotate(movement.rotation, movement.angle);
-                        break;
-                    case common_types::MovementCommandType::Advance:
-                        result = movement_.advance(movement.distance);
-                        break;
-                    case common_types::MovementCommandType::Elevate:
-                        result = movement_.elevate(movement.distance);
-                        break;
-                }
-            } catch (const std::exception& e) {
-                pending_sequence_.reset();
-                return common_types::DroneStepResult{
-                    common_types::DroneStepStatus::Error, e.what()};
+            switch (movement.type) {
+                case common_types::MovementCommandType::Hover:
+                    break;
+                case common_types::MovementCommandType::Rotate:
+                    result = movement_.rotate(movement.rotation, movement.angle);
+                    break;
+                case common_types::MovementCommandType::Advance:
+                    result = movement_.advance(movement.distance);
+                    break;
+                case common_types::MovementCommandType::Elevate:
+                    result = movement_.elevate(movement.distance);
+                    break;
             }
 
             if (result.success) {
@@ -658,4 +650,4 @@ common_types::DroneState DroneControlImpl::state() const {
         gps_.position(), gps_.heading(), step_index_};
 }
 
-} // namespace MissionControl_322889890_315113738
+} // namespace mission_control_322889890_315113738

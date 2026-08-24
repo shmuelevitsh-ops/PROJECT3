@@ -25,7 +25,7 @@
 
 using namespace common;
 using namespace common::types;
-using namespace MissionControl_322889890_315113738;
+using namespace mission_control_322889890_315113738;
 using ::testing::_;
 using ::testing::DoAll;
 using ::testing::InSequence;
@@ -416,11 +416,11 @@ TEST_F(DroneControl, MovementFailureRetriesExhaustedThrowsWithoutScanningOrAdvan
 
 // Movement collision scenario: MockMovement (the real implementation, not this mock) rejects a
 // real wall collision by throwing rather than returning success=false, since it alone can see
-// the hidden map. step() must catch that narrowly around the movement dispatch, report it as an
-// Error DroneStepResult without scanning or advancing step_index_, and must never let the
-// exception itself escape step() -- and, unlike a returned success=false (row 7), it is never
-// retried.
-TEST_F(DroneControl, MovementExceptionReturnsErrorWithoutScanningOrAdvancingStepIndex) {
+// the hidden map. A real wall collision is a fatal simulation-run failure, not a recoverable step
+// outcome -- step() must let the exception propagate out unchanged (never catch it, never convert
+// it into a DroneStepStatus::Error), must never reach lidar_.scan() or advance step_index_, and,
+// unlike a returned success=false (row 7), must never retry it.
+TEST_F(DroneControl, MovementExceptionPropagatesWithoutScanningOrAdvancingStepIndex) {
     MappingStepCommand command;
     command.movement = advanceCommand(10.0 * isq::length[cm]);
     command.scan_orientation = Orientation{}; // should never be reached
@@ -430,11 +430,7 @@ TEST_F(DroneControl, MovementExceptionReturnsErrorWithoutScanningOrAdvancingStep
         .WillOnce([]() -> MovementResult { throw std::runtime_error("drone collided with a wall"); });
     EXPECT_CALL(lidar_, scan(_)).Times(0);
 
-    DroneStepResult result;
-    EXPECT_NO_THROW(result = control_.step());
-
-    EXPECT_EQ(result.status, DroneStepStatus::Error);
-    EXPECT_EQ(result.message, "drone collided with a wall");
+    EXPECT_THROW((void)control_.step(), std::runtime_error);
     EXPECT_EQ(control_.state().step_index, 0u);
 }
 
@@ -2361,8 +2357,8 @@ TEST_F(DroneControl, SuccessfulRetryScanIsMappedAndStoredAsLatestScan) {
 // later pending row-8 chunk, and never touches internal_position_/step_index_/scan state for a
 // failed attempt -- only a genuinely successful attempt falls through to row 12 and the scan
 // block. Exhausting the budget throws std::runtime_error (not an Error DroneStepResult). A thrown
-// exception is a distinct, non-retried failure mode (see
-// MovementExceptionReturnsErrorWithoutScanningOrAdvancingStepIndex above). Hover never calls
+// exception is a distinct, non-retried failure mode that propagates out of step() unchanged (see
+// MovementExceptionPropagatesWithoutScanningOrAdvancingStepIndex above). Hover never calls
 // movement_ at all, so it is unaffected by any of this.
 
 TEST_F(DroneControl, FalseThenSuccessRetriesSameMovementOnceAndSucceeds) {

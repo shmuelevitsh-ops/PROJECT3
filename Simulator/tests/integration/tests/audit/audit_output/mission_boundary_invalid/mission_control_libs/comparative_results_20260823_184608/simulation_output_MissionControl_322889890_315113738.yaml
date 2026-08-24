@@ -1,6 +1,6 @@
 score_report:
   composition_file: /workspaces/ex_3_skeleton-main/Simulator/tests/integration/audit_inputs/compositions/composition_invalid_boundary.yaml
-  generated_at_utc: 2026-08-23T17:10:13Z
+  generated_at_utc: 2026-08-23T18:46:09Z
   metric: output_map_accuracy
   score_range:
     min: 0

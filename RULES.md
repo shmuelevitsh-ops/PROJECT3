@@ -6,7 +6,7 @@ Read this file before starting every implementation stage, for every feature are
 - `common/` code: namespace `common`.
 - `MissionControl/common_mission_control/.../IDroneControl.h`: namespace `mission_control`.
 - Simulator's own code: namespace `simulator` (not id-qualified).
-- Only submitted implementation code uses id-qualified namespaces: `Algorithm_322889890_315113738`, `MissionControl_322889890_315113738`, and (if `UserCommon/` is used) `UserCommon_322889890_315113738`. The id pair applies to these namespaces and to id-qualified build target/output names (see below) — not to every namespace in the project.
+- Only submitted implementation code uses id-qualified namespaces: `algorithm_322889890_315113738`, `mission_control_322889890_315113738`, and (if `user_common/` is used) `user_common_322889890_315113738`. The id pair applies to these namespaces and to id-qualified build target/output names (see below) — not to every namespace in the project.
 
 ## `common/` is read-only
 - Nothing under `common/` (headers, `CMakeLists.txt`, or any other file) may be edited, removed, or added to — published as-is by course staff.
