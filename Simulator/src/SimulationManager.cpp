@@ -124,8 +124,10 @@ types::SimulationResult buildErrorResult(const types::SimulationConfigData& simu
     result.simulation_config = simulation;
     result.mission_config = mission;
     result.output_map_config.boundaries = mission.mission_bounds;
+    // map_local = mission_relative + offset, so voxel index 0 sits at mission_relative = -offset;
+    // mirrors SimulationRunFactoryImpl::outputMapConfig()'s offset for this same output map.
     result.output_map_config.offset =
-        Position3D{mission.mission_bounds.min_x, mission.mission_bounds.min_y, mission.mission_bounds.min_height};
+        Position3D{-mission.mission_bounds.min_x, -mission.mission_bounds.min_y, -mission.mission_bounds.min_height};
     result.output_map_config.resolution = outputMapResolution(simulation);
     result.mission_score = kErrorScore;
 

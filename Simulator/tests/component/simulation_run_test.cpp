@@ -785,8 +785,12 @@ TEST_F(SimulationRun, ResolutionRequestStatusIgnoredWhenOutputResolutionDiffersF
 
 TEST_F(SimulationRun, FactoryBuiltOutputMapOffsetComesFromMissionBoundsNotHiddenMap) {
     // The mapping algorithm must stay unaware of the hidden map's geometry: output_map's offset
-    // must be derived from mission.mission_bounds' minimum corner, never from the hidden
-    // (ground-truth) map's own offset. Uses the real SimulationRunFactoryImpl (not a
+    // must be derived from mission.mission_bounds' minimum corner (negated -- map_local =
+    // mission_relative + offset, so voxel index 0 sits at mission_relative = -offset, which must
+    // be that minimum corner), never from the hidden (ground-truth) map's own offset. Mission
+    // minima below are non-zero and of mixed sign so the negation itself is observable: a bug
+    // that forgot to negate would report the un-negated minima instead. Uses the real
+    // SimulationRunFactoryImpl (not a
     // SimulationRunImpl constructed directly with manual configs) since that's the only place
     // this wiring actually happens. Points at a real (tiny) .npy fixture, since a load failure
     // now fails the run instead of falling back to an empty map; max_steps=0 means the mission
@@ -817,10 +821,12 @@ TEST_F(SimulationRun, FactoryBuiltOutputMapOffsetComesFromMissionBoundsNotHidden
 
     MissionConfigData mission_config = missionConfig();
     mission_config.max_steps = 0;
+    // Non-zero, mixed-sign minima so the expected negation is observable: a bug that forgot to
+    // negate would report these un-negated minima instead of their negatives.
     mission_config.mission_bounds = MappingBounds{
-        0.0 * x_extent[cm], 10.0 * x_extent[cm],
-        0.0 * y_extent[cm], 10.0 * y_extent[cm],
-        0.0 * z_extent[cm], 10.0 * z_extent[cm]};
+        -30.0 * x_extent[cm], -20.0 * x_extent[cm],
+        20.0 * y_extent[cm], 30.0 * y_extent[cm],
+        -50.0 * z_extent[cm], -40.0 * z_extent[cm]};
 
     const std::filesystem::path output_path =
         "tests/component/test_output/simulation_run_test/factory_output_map_offset";
@@ -838,10 +844,11 @@ TEST_F(SimulationRun, FactoryBuiltOutputMapOffsetComesFromMissionBoundsNotHidden
         factory.create(simulation_config, mission_config, droneConfig(), lidarConfig(), output_path);
     const SimulationResult result = run->run();
 
-    EXPECT_EQ(result.output_map_config.offset.x, mission_config.mission_bounds.min_x)
-        << "output map's offset.x must come from mission_bounds, not the hidden map's own offset";
-    EXPECT_EQ(result.output_map_config.offset.y, mission_config.mission_bounds.min_y);
-    EXPECT_EQ(result.output_map_config.offset.z, mission_config.mission_bounds.min_height);
+    EXPECT_EQ(result.output_map_config.offset.x, -mission_config.mission_bounds.min_x)
+        << "output map's offset.x must be the negated mission_bounds minimum (map_local = "
+           "mission_relative + offset), not the hidden map's own offset";
+    EXPECT_EQ(result.output_map_config.offset.y, -mission_config.mission_bounds.min_y);
+    EXPECT_EQ(result.output_map_config.offset.z, -mission_config.mission_bounds.min_height);
 }
 
 TEST_F(SimulationRun, FactoryWritesOutputMapWithNpyExtensionAsAValidArray) {

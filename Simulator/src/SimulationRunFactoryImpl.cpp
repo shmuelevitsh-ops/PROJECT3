@@ -59,12 +59,13 @@ std::unique_ptr<Map3DImpl> loadHiddenMap(const types::SimulationConfigData& simu
 }
 
 // Builds the output map from the mission bounds.
-// Its offset is the minimum mission corner.
+// map_local = mission_relative + offset, so voxel index 0 sits at mission_relative = -offset;
+// its offset is therefore the negated minimum mission corner, putting that corner at index 0.
 common::types::MapConfig outputMapConfig(const types::SimulationConfigData& simulation,
                                          const common::types::MissionConfigData& mission) {
     return common::types::MapConfig{
         mission.mission_bounds,
-        common::Position3D{mission.mission_bounds.min_x, mission.mission_bounds.min_y, mission.mission_bounds.min_height},
+        common::Position3D{-mission.mission_bounds.min_x, -mission.mission_bounds.min_y, -mission.mission_bounds.min_height},
         outputMapResolution(simulation)};
 }
 
