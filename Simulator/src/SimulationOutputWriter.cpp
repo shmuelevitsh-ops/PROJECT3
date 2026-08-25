@@ -248,31 +248,44 @@ void writeComparativeReport(const std::filesystem::path& composition_file,
                             const std::vector<ComponentRunTotals>& mission_control_totals,
                             const std::vector<std::string>& failed_mission_controls,
                             const std::filesystem::path& output_yaml_path) {
-    YAML::Node comparative;
-    comparative["composition_file"] = composition_file.string();
-    comparative["mission_control_folder"] = mission_control_folder.string();
-    comparative["generated_at_utc"] = currentUtcTimestamp();  // moved/duplicated helper, see note
+    // Built with the imperative Emitter API (rather than a YAML::Node tree) because the staff
+    // format requires per-scalar double-quoting and inline (flow) .so lists -- neither is
+    // controllable through Node's tree-to-events emission (YAML::Node::SetStyle only reaches
+    // maps/sequences, and scalar strings always emit via NodeEvents' plain OnScalar path).
+    YAML::Emitter out;
+    out << YAML::BeginMap;
+    out << YAML::Key << "comparative_report" << YAML::Value << YAML::BeginMap;
 
-    YAML::Node results_summary;
+    out << YAML::Key << "composition_file" << YAML::Value << YAML::DoubleQuoted << composition_file.string();
+    out << YAML::Key << "mission_control_folder" << YAML::Value << YAML::DoubleQuoted
+        << mission_control_folder.string();
+    out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << currentUtcTimestamp();
+
+    out << YAML::Key << "results_summary" << YAML::Value << YAML::BeginSeq;
     for (const auto& group : groupBySameResult(mission_control_totals)) {
-        YAML::Node group_node;
-        YAML::Node names;
-        for (const ComponentRunTotals* item : group) names.push_back(item->component_name);
-        group_node["same_results"] = names;
-        group_node["total_score"] = group.front()->total_score;
-        group_node["total_steps"] = group.front()->total_steps;
-        results_summary.push_back(group_node);
+        out << YAML::BeginMap;
+        out << YAML::Key << "same_results" << YAML::Value << YAML::Flow << YAML::BeginSeq;
+        for (const ComponentRunTotals* item : group) {
+            out << YAML::DoubleQuoted << item->component_name;
+        }
+        out << YAML::EndSeq;
+        out << YAML::Key << "total_score" << YAML::Value << group.front()->total_score;
+        out << YAML::Key << "total_steps" << YAML::Value << group.front()->total_steps;
+        out << YAML::EndMap;
     }
-    comparative["results_summary"] = results_summary;
+    out << YAML::EndSeq;
 
-    YAML::Node errors_node;
-    for (const std::string& name : failed_mission_controls) errors_node.push_back(name);
-    comparative["errors"] = errors_node;
+    out << YAML::Key << "errors" << YAML::Value << YAML::Flow << YAML::BeginSeq;
+    for (const std::string& name : failed_mission_controls) {
+        out << YAML::DoubleQuoted << name;
+    }
+    out << YAML::EndSeq;
 
-    YAML::Node root;
-    root["comparative_report"] = comparative;
-    std::ofstream out(output_yaml_path);
-    out << root;
+    out << YAML::EndMap; // comparative_report
+    out << YAML::EndMap; // root
+
+    std::ofstream file(output_yaml_path);
+    file << out.c_str() << '\n';
 }
 
 void writeCompetitiveReport(const std::filesystem::path& composition_file,
@@ -286,29 +299,37 @@ void writeCompetitiveReport(const std::filesystem::path& composition_file,
         return a.total_steps < b.total_steps;
     });
 
-    YAML::Node competitive;
-    competitive["composition_file"] = composition_file.string();
-    competitive["mission_control"] = mission_control.string();
-    competitive["generated_at_utc"] = currentUtcTimestamp();
+    // See writeComparativeReport() above for why this uses the imperative Emitter API instead of
+    // a YAML::Node tree.
+    YAML::Emitter out;
+    out << YAML::BeginMap;
+    out << YAML::Key << "competitive_report" << YAML::Value << YAML::BeginMap;
 
-    YAML::Node results_summary;
+    out << YAML::Key << "composition_file" << YAML::Value << YAML::DoubleQuoted << composition_file.string();
+    out << YAML::Key << "mission_control" << YAML::Value << YAML::DoubleQuoted << mission_control.string();
+    out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << currentUtcTimestamp();
+
+    out << YAML::Key << "results_summary" << YAML::Value << YAML::BeginSeq;
     for (const ComponentRunTotals& item : sorted) {
-        YAML::Node entry;
-        entry["algorithm"] = item.component_name;
-        entry["total_score"] = item.total_score;
-        entry["total_steps"] = item.total_steps;
-        results_summary.push_back(entry);
+        out << YAML::BeginMap;
+        out << YAML::Key << "algorithm" << YAML::Value << YAML::DoubleQuoted << item.component_name;
+        out << YAML::Key << "total_score" << YAML::Value << item.total_score;
+        out << YAML::Key << "total_steps" << YAML::Value << item.total_steps;
+        out << YAML::EndMap;
     }
-    competitive["results_summary"] = results_summary;
+    out << YAML::EndSeq;
 
-    YAML::Node errors_node;
-    for (const std::string& name : failed_algorithms) errors_node.push_back(name);
-    competitive["errors"] = errors_node;
+    out << YAML::Key << "errors" << YAML::Value << YAML::Flow << YAML::BeginSeq;
+    for (const std::string& name : failed_algorithms) {
+        out << YAML::DoubleQuoted << name;
+    }
+    out << YAML::EndSeq;
 
-    YAML::Node root;
-    root["competitive_report"] = competitive;
-    std::ofstream out(output_yaml_path);
-    out << root;
+    out << YAML::EndMap; // competitive_report
+    out << YAML::EndMap; // root
+
+    std::ofstream file(output_yaml_path);
+    file << out.c_str() << '\n';
 }
 
 } // namespace simulator
