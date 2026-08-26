@@ -36,9 +36,9 @@ namespace {
     }
     const double radius_cm = numCm(radius);
 
-    const double cx = (center.x - config.offset.x).force_numerical_value_in(cm);
-    const double cy = (center.y - config.offset.y).force_numerical_value_in(cm);
-    const double cz = (center.z - config.offset.z).force_numerical_value_in(cm);
+    const double cx = (center.x + config.offset.x).force_numerical_value_in(cm);
+    const double cy = (center.y + config.offset.y).force_numerical_value_in(cm);
+    const double cz = (center.z + config.offset.z).force_numerical_value_in(cm);
 
     // The lower bound uses ceil(...)-1 rather than floor(...): when (center - radius) lands
     // exactly on a resolution boundary, floor() rounds up to the voxel that starts there and
@@ -59,9 +59,9 @@ namespace {
         for (long iy = iy_min; iy <= iy_max; ++iy) {
             for (long iz = iz_min; iz <= iz_max; ++iz) {
                 const Position3D voxel_min{
-                    config.offset.x + static_cast<double>(ix) * resolution_cm * x_extent[cm],
-                    config.offset.y + static_cast<double>(iy) * resolution_cm * y_extent[cm],
-                    config.offset.z + static_cast<double>(iz) * resolution_cm * z_extent[cm],
+                    static_cast<double>(ix) * resolution_cm * x_extent[cm] - config.offset.x,
+                    static_cast<double>(iy) * resolution_cm * y_extent[cm] - config.offset.y,
+                    static_cast<double>(iz) * resolution_cm * z_extent[cm] - config.offset.z,
                 };
                 const Position3D voxel_max{
                     voxel_min.x + resolution_cm * x_extent[cm],

@@ -146,11 +146,14 @@ void fillAllEmpty(Map3DImpl& map, long voxels_per_axis) {
 MapConfig customGridConfig(long voxels_per_axis, double resolution_cm, double offset_x_cm = 0.0,
                             double offset_y_cm = 0.0, double offset_z_cm = 0.0) {
     const double extent_cm = static_cast<double>(voxels_per_axis) * resolution_cm;
+    // config.offset uses the official map_local = mission_relative + offset convention, so it is
+    // the negation of the grid's mission-relative starting corner (offset_x_cm/y/z below) --
+    // that keeps that corner mapping to voxel index 0, same as before the convention fix.
     return MapConfig{
         MappingBounds{offset_x_cm * x_extent[cm], (offset_x_cm + extent_cm) * x_extent[cm],
                       offset_y_cm * y_extent[cm], (offset_y_cm + extent_cm) * y_extent[cm],
                       offset_z_cm * z_extent[cm], (offset_z_cm + extent_cm) * z_extent[cm]},
-        Position3D{offset_x_cm * x_extent[cm], offset_y_cm * y_extent[cm], offset_z_cm * z_extent[cm]},
+        Position3D{-offset_x_cm * x_extent[cm], -offset_y_cm * y_extent[cm], -offset_z_cm * z_extent[cm]},
         resolution_cm * isq::length[cm]};
 }
 
@@ -159,9 +162,9 @@ MapConfig customGridConfig(long voxels_per_axis, double resolution_cm, double of
 Position3D voxelCenterIn(const MapConfig& config, long ix, long iy, long iz) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
     return Position3D{
-        config.offset.x + (static_cast<double>(ix) + 0.5) * resolution_cm * x_extent[cm],
-        config.offset.y + (static_cast<double>(iy) + 0.5) * resolution_cm * y_extent[cm],
-        config.offset.z + (static_cast<double>(iz) + 0.5) * resolution_cm * z_extent[cm]};
+        (static_cast<double>(ix) + 0.5) * resolution_cm * x_extent[cm] - config.offset.x,
+        (static_cast<double>(iy) + 0.5) * resolution_cm * y_extent[cm] - config.offset.y,
+        (static_cast<double>(iz) + 0.5) * resolution_cm * z_extent[cm] - config.offset.z};
 }
 
 void fillAllEmptyIn(Map3DImpl& map, const MapConfig& config, long voxels_per_axis) {
@@ -205,9 +208,9 @@ struct TestVoxelIndex {
 TestVoxelIndex toIndexIn(const MapConfig& config, const Position3D& pos) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
     return TestVoxelIndex{
-        static_cast<long>(std::floor((pos.x - config.offset.x).force_numerical_value_in(cm) / resolution_cm)),
-        static_cast<long>(std::floor((pos.y - config.offset.y).force_numerical_value_in(cm) / resolution_cm)),
-        static_cast<long>(std::floor((pos.z - config.offset.z).force_numerical_value_in(cm) / resolution_cm)),
+        static_cast<long>(std::floor((pos.x + config.offset.x).force_numerical_value_in(cm) / resolution_cm)),
+        static_cast<long>(std::floor((pos.y + config.offset.y).force_numerical_value_in(cm) / resolution_cm)),
+        static_cast<long>(std::floor((pos.z + config.offset.z).force_numerical_value_in(cm) / resolution_cm)),
     };
 }
 
@@ -220,9 +223,9 @@ TestVoxelIndex toIndexIn(const MapConfig& config, const Position3D& pos) {
 bool voxelVolumeOverlapsSphere(const MapConfig& config, const TestVoxelIndex& idx, const Position3D& pos,
                                 double radius_cm) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);
-    const double min_x = config.offset.x.force_numerical_value_in(cm) + static_cast<double>(idx.ix) * resolution_cm;
-    const double min_y = config.offset.y.force_numerical_value_in(cm) + static_cast<double>(idx.iy) * resolution_cm;
-    const double min_z = config.offset.z.force_numerical_value_in(cm) + static_cast<double>(idx.iz) * resolution_cm;
+    const double min_x = static_cast<double>(idx.ix) * resolution_cm - config.offset.x.force_numerical_value_in(cm);
+    const double min_y = static_cast<double>(idx.iy) * resolution_cm - config.offset.y.force_numerical_value_in(cm);
+    const double min_z = static_cast<double>(idx.iz) * resolution_cm - config.offset.z.force_numerical_value_in(cm);
     const double max_x = min_x + resolution_cm;
     const double max_y = min_y + resolution_cm;
     const double max_z = min_z + resolution_cm;

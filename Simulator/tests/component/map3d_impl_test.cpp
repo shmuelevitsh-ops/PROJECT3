@@ -450,19 +450,51 @@ TEST(Map3DImpl, FreshMapConstructionSucceedsWhenBoundaryMinMapsToNonNegativeInde
     EXPECT_NO_THROW((Map3DImpl{emptyNpy(), config}));
 }
 
-TEST(Map3DImpl, NegativeOffsetWithBoundariesAtOffsetIsValid) {
+TEST(Map3DImpl, PositiveOffsetWithBoundariesAtNegativeOffsetIsValid) {
+    // map_local = mission_relative + offset, so voxel index 0 sits at mission_relative = -offset;
+    // an offset of +50 puts boundaries.min_x (-50) exactly at that index-0 position.
     const MapConfig config{
         MappingBounds{
             -50.0 * x_extent[cm], 50.0 * x_extent[cm],
             -50.0 * y_extent[cm], 50.0 * y_extent[cm],
             -50.0 * z_extent[cm], 50.0 * z_extent[cm]},
-        Position3D{-50.0 * x_extent[cm], -50.0 * y_extent[cm], -50.0 * z_extent[cm]},
+        Position3D{50.0 * x_extent[cm], 50.0 * y_extent[cm], 50.0 * z_extent[cm]},
         res10()};
 
     Map3DImpl map{emptyNpy(), config};
     map.set(pos(-50.0, -50.0, -50.0), VoxelOccupancy::Occupied);
     EXPECT_EQ(map.atVoxel(pos(-50.0, -50.0, -50.0)), VoxelOccupancy::Occupied);
     EXPECT_TRUE(map.isInBounds(pos(0.0, 0.0, 0.0)));
+}
+
+// Official house sanity check for the map_axes_offset convention: mission-relative z=10 with
+// offset=150 must land at map-local z=160 (map_local = mission_relative + offset), i.e. voxel
+// index 160 at 1cm resolution -- not index 10, which is what the reverse (buggy) convention
+// would have produced.
+TEST(Map3DImpl, NonZeroOffsetSanityCheckMissionTenOffsetOneFiftyMapsToLocalOneSixty) {
+    constexpr double kOffsetCm = 150.0;
+    constexpr double kMissionZCm = 10.0;
+    constexpr double kExpectedLocalIndex = 160.0; // mission_relative + offset, at 1cm resolution.
+
+    const MapConfig config{
+        MappingBounds{
+            0.0 * x_extent[cm], 1.0 * x_extent[cm],
+            0.0 * y_extent[cm], 1.0 * y_extent[cm],
+            -kOffsetCm * z_extent[cm], (200.0 - kOffsetCm) * z_extent[cm]},
+        Position3D{0.0 * x_extent[cm], 0.0 * y_extent[cm], kOffsetCm * z_extent[cm]},
+        1.0 * isq::length[cm]};
+
+    auto array = makeIntArray(NpyArray::shape_t{1, 1, 200}, 0);
+    // Write Occupied directly at the raw index the official convention predicts (160), bypassing
+    // Map3DImpl::set() entirely, so this test does not just check internal self-consistency.
+    array->Data<int>()[static_cast<std::size_t>(kExpectedLocalIndex)] = 1;
+
+    Map3DImpl map{array, config};
+    EXPECT_EQ(map.atVoxel(pos(0.0, 0.0, kMissionZCm)), VoxelOccupancy::Occupied)
+        << "mission z=10 with offset=150 must read the voxel stored at map-local index 160.";
+    // Index 10 -- what the reverse (mission - offset) convention would have used -- must remain
+    // untouched (still Empty), so this test cannot pass under the old, buggy convention.
+    EXPECT_EQ(array->Data<int>()[10], 0);
 }
 
 TEST(Map3DImpl, FreshMapAllocationSizedFromOffsetNotBoundaryMinimum) {
