@@ -4,7 +4,6 @@
 #include <Common/MissionControlFactory.h>
 
 #include <filesystem>
-#include <mutex>
 #include <vector>
 
 namespace simulator {
@@ -31,7 +30,7 @@ public:
 private:
     Registrar() = default;
     ~Registrar();
-    
+
     // Private RAII helper for Registrar-owned plugin handles.
     // Nested here because only Registrar should manage loaded .so lifetimes.
     // Owns a dlopen handle and closes it on destruction.
@@ -51,7 +50,6 @@ private:
         void* handle_ = nullptr;
     };
 
-    std::mutex load_mutex_;
     std::vector<common::MappingAlgorithmFactory> mapping_algorithm_factories_;
     std::vector<common::MissionControlFactory> mission_control_factories_;
     std::vector<LibraryHandle> libraries_;

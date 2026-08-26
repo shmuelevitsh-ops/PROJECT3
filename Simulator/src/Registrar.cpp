@@ -54,8 +54,6 @@ Registrar::LibraryHandle& Registrar::LibraryHandle::operator=(LibraryHandle&& ot
     return *this;
 }
 
-// Called during dlopen while load_mutex_ is already held.
-// Do not lock here to avoid self-deadlock.
 void Registrar::addMappingAlgorithm(common::MappingAlgorithmFactory factory) {
     mapping_algorithm_factories_.push_back(std::move(factory));
 }
@@ -66,9 +64,6 @@ void Registrar::addMissionControl(common::MissionControlFactory factory) {
 
 common::MappingAlgorithmFactory Registrar::loadMappingAlgorithm(
     const std::filesystem::path& library_path) {
-    // Keep the entire load-and-registration sequence atomic with respect to other plugin loads.
-    std::lock_guard<std::mutex> lock(load_mutex_);
-
     // Remember the registry sizes so we can detect what this .so registers.
     const std::size_t mapping_before = mapping_algorithm_factories_.size();
     const std::size_t mission_before = mission_control_factories_.size();
@@ -109,8 +104,6 @@ common::MappingAlgorithmFactory Registrar::loadMappingAlgorithm(
 
 common::MissionControlFactory Registrar::loadMissionControl(
     const std::filesystem::path& library_path) {
-    // Keep the entire load-and-registration sequence atomic with respect to other plugin loads.
-    std::lock_guard<std::mutex> lock(load_mutex_);
     // Remember the registry sizes so we can detect what this .so registers.
     const std::size_t mapping_before = mapping_algorithm_factories_.size();
     const std::size_t mission_before = mission_control_factories_.size();

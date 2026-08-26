@@ -101,16 +101,8 @@ int runSimulator(
 
     // 3. Run the simulator according to the selected mode.
     try {
-        std::size_t component_count = 0;
-        const simulator::Simulator sim;
-
-        if (std::holds_alternative<simulator::ComparativeOptions>(options)) {
-            const auto& comparative = std::get<simulator::ComparativeOptions>(options);
-            component_count = sim.runComparative(comparative, results_dir);
-        } else {
-            const auto& competition = std::get<simulator::CompetitionOptions>(options);
-            component_count = sim.runCompetition(competition, results_dir);
-        }
+        const simulator::Simulator sim(options, results_dir);
+        const std::size_t component_count = sim.run();
 
         std::cout << "simulator_322889890_315113738: ran " << component_count << " component(s).\n";
         return 0;

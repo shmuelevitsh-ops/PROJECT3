@@ -225,7 +225,7 @@ std::size_t runComparativeScratch(const std::string& tag, const std::optional<in
     const simulator::ComparativeOptions options = parseComparative(args);
 
     CerrCapture capture;
-    return simulator::Simulator().runComparative(options, results_dir);
+    return simulator::Simulator(options, results_dir).run();
 }
 
 // Symmetric to runComparativeScratch, but for runCompetition: builds one complete, self-contained
@@ -252,7 +252,7 @@ std::size_t runCompetitionScratchMixed(const std::string& tag, const std::filesy
                           "algorithms_folder=" + algo_dir.path().string(), "num_threads=4"});
 
     CerrCapture capture;
-    return simulator::Simulator().runCompetition(options, results_dir);
+    return simulator::Simulator(options, results_dir).run();
 }
 
 // What one traceExecution() call observed while its tasks ran.
@@ -388,7 +388,7 @@ TEST(MultithreadingVerify, RunWritePhaseFailureIsolatesOneComponentUnderConcurre
                           "algorithm=" + algorithm_copy.string(), "num_threads=4"});
 
     CerrCapture capture;
-    const std::size_t ran = simulator::Simulator().runComparative(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
     const std::string log = capture.str();
 
     EXPECT_EQ(ran, 3u);
@@ -452,7 +452,7 @@ std::string runScenarioCapturingErrorLog(const std::string& tag, std::size_t& ra
     {
         std::ofstream error_log(error_log_path);
         const simulator::CerrSinkGuard sink(error_log.rdbuf());
-        ran_out = simulator::Simulator().runComparative(options, results_dir.path());
+        ran_out = simulator::Simulator(options, results_dir.path()).run();
     } // sink destroyed (restores std::cerr), then error_log destroyed (flushes to disk).
 
     std::ifstream in(error_log_path);
@@ -534,7 +534,7 @@ TEST(MultithreadingVerify, ReturnValueCorrectWithMixOfSuccessesAndFailuresUnderC
                           "algorithm=" + algorithm_copy.string(), "num_threads=4"});
 
     CerrCapture capture;
-    const std::size_t ran = simulator::Simulator().runComparative(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
 
     EXPECT_EQ(ran, 3u);
 

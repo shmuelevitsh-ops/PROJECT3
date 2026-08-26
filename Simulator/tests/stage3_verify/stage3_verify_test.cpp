@@ -144,7 +144,7 @@ TEST(Stage3Verify, ComparativeMultiComponentGarbageNestingAndOrdering) {
     ScratchDir results_dir("stage3_verify_results_multi");
 
     CerrCapture capture;
-    const std::size_t ran = simulator::Simulator().runComparative(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
     const std::string log = capture.str();
 
     EXPECT_EQ(ran, 3u);
@@ -199,7 +199,7 @@ TEST(Stage3Verify, ComparativeFixedComponentLoadFailurePropagates) {
         parseComparative({"-comparative", "simulation=" + compose_path.string(),
                           "mission_control_folder=" + mc_dir.path().string(), "algorithm=" + bogus_algo.string()});
 
-    EXPECT_THROW((void)simulator::Simulator().runComparative(options, results_dir.path()), std::exception);
+    EXPECT_THROW((void)simulator::Simulator(options, results_dir.path()).run(), std::exception);
     EXPECT_TRUE(std::filesystem::is_empty(results_dir.path()));
 }
 
@@ -220,7 +220,7 @@ TEST(Stage3Verify, CompetitionFixedComponentLoadFailurePropagates) {
         parseCompetition({"-competition", "simulation=" + compose_path.string(), "mission_control=" + bogus_mc.string(),
                           "algorithms_folder=" + algo_dir.path().string()});
 
-    EXPECT_THROW((void)simulator::Simulator().runCompetition(options, results_dir.path()), std::exception);
+    EXPECT_THROW((void)simulator::Simulator(options, results_dir.path()).run(), std::exception);
     EXPECT_TRUE(std::filesystem::is_empty(results_dir.path()));
 }
 
@@ -248,7 +248,7 @@ TEST(Stage3Verify, ComparativeRunWritePhaseFailureIsolatesOneComponent) {
                           "mission_control_folder=" + mc_dir.path().string(), "algorithm=" + algorithm_copy.string()});
 
     CerrCapture capture;
-    const std::size_t ran = simulator::Simulator().runComparative(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
     const std::string log = capture.str();
 
     EXPECT_EQ(ran, 1u);
@@ -300,7 +300,7 @@ TEST(Stage3Verify, CompetitionMultiComponentAndGarbage) {
                           "algorithms_folder=" + algo_dir.path().string()});
 
     CerrCapture capture;
-    const std::size_t ran = simulator::Simulator().runCompetition(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
     const std::string log = capture.str();
 
     EXPECT_EQ(ran, 2u);
