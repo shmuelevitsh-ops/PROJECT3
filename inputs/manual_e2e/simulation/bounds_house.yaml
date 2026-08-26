@@ -1,0 +1,12 @@
+simulation_config:
+  map_filename: "../../map/scenario_house.npy"
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 190
+    y_cm: 170
+    height_cm: 40
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: -40
+    y_offset: 30
+    height_offset: 120

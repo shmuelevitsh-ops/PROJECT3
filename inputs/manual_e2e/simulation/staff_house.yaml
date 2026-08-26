@@ -1,0 +1,13 @@
+simulation_config:
+  # Staff values; only map_filename is adapted to this file's directory. World z=10 maps to local z=160.
+  map_filename: "../../map/scenario_house.npy"
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 150
+    y_cm: 200
+    height_cm: 10
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 150

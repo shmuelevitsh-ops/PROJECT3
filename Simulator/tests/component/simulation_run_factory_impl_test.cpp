@@ -237,9 +237,20 @@ TEST(SimulationRunFactoryImpl, SimulationManagerScoresMissingHiddenMapNegativeOn
     composition.drone_configs = {minimalDroneConfig()};
     composition.lidar_configs = {minimalLidarConfig()};
 
+    // Reproduces the same "sim_<i>"/"mission_<i>_<j>"/"drone_<i>"/"lidar_<i>" stems the assertions
+    // below check for -- SimulationManager no longer generates these itself, so they must be
+    // supplied explicitly.
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {
+        {ReferencedConfigFile{"sim_0.yaml"}, {ReferencedConfigFile{"mission_0_0.yaml"}}},
+        {ReferencedConfigFile{"sim_1.yaml"}, {ReferencedConfigFile{"mission_1_0.yaml"}}},
+    };
+    file_paths.drone_paths = {"drone_0.yaml"};
+    file_paths.lidar_paths = {"lidar_0.yaml"};
+
     auto factory = std::make_unique<SimulationRunFactoryImpl>(
         noOpMappingAlgorithmFactory(), savingMissionControlFactory(), /*verbose=*/false);
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report = manager.run(composition, output_path);
 
     ASSERT_EQ(report.runs.size(), 2u);

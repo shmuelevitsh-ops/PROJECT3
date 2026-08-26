@@ -1,0 +1,17 @@
+simulation_compositions:
+  simulations:
+    - simulation_config: "simulation/bounds_small.yaml"
+      mission_configs:
+        - "mission/bounds_small.yaml"
+    - simulation_config: "simulation/bounds_big.yaml"
+      mission_configs:
+        - "mission/bounds_big.yaml"
+    - simulation_config: "simulation/bounds_house.yaml"
+      mission_configs:
+        - "mission/bounds_house.yaml"
+
+  drone_configs:
+    - "../drone/drone_small.yaml"
+
+  lidar_configs:
+    - "../lidar/lidar_long.yaml"

@@ -1,0 +1,28 @@
+simulation_compositions:
+  simulations:
+    - simulation_config: "simulation/staff_small_room.yaml"
+      mission_configs:
+        - "../mission/small_mission_room.yaml"
+    - simulation_config: "simulation/eq_small_shifted.yaml"
+      mission_configs:
+        - "mission/eq_small_shifted.yaml"
+
+    - simulation_config: "simulation/staff_big_room.yaml"
+      mission_configs:
+        - "../mission/large_mission_room.yaml"
+    - simulation_config: "simulation/eq_big_shifted.yaml"
+      mission_configs:
+        - "mission/eq_big_shifted.yaml"
+
+    - simulation_config: "simulation/staff_house.yaml"
+      mission_configs:
+        - "../mission/house_mission_full.yaml"
+    - simulation_config: "simulation/eq_house_shifted.yaml"
+      mission_configs:
+        - "mission/eq_house_shifted.yaml"
+
+  drone_configs:
+    - "../drone/drone_small.yaml"
+
+  lidar_configs:
+    - "../lidar/lidar_long.yaml"

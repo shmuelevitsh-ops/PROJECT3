@@ -7,7 +7,9 @@
 // run/write-phase failure still isolates exactly one component under real concurrency, error.log
 // stays complete/non-interleaved/correctly attributed under concurrency (never asserting on line
 // order), and the returned "ran N component(s)" count is correct under a mix of successes and
-// failures.
+// failures. Also covers the num_threads > successfully-loaded-count case for both modes (some
+// loads fail, and all loads fail), since ParallelExecutor must be sized off how many components
+// actually loaded, not how many .so files were merely discovered.
 //
 // Uses the same synthetic one-simulation/one-mission/one-drone/one-lidar composition established
 // by Stage 1/3's own verification (small_simulation_out/small_mission_out/drone_small/lidar_short)
@@ -528,10 +530,14 @@ TEST(MultithreadingVerify, ReturnValueCorrectWithMixOfSuccessesAndFailuresUnderC
 
     ScratchDir results_dir("mt_verify_results_mixed_return");
 
+    // num_threads=8 deliberately exceeds both the 5 discovered .so files and, more importantly,
+    // the 3 that actually load successfully -- ParallelExecutor must be sized off the successful
+    // count (3), not the discovered count (5) or num_threads (8), so it never creates a worker
+    // thread with nothing left to run (RULES.md's threading section).
     const simulator::ComparativeOptions options =
         parseComparative({"-comparative", "simulation=" + compose_path.string(),
                           "mission_control_folder=" + mc_dir.path().string(),
-                          "algorithm=" + algorithm_copy.string(), "num_threads=4"});
+                          "algorithm=" + algorithm_copy.string(), "num_threads=8"});
 
     CerrCapture capture;
     const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
@@ -541,6 +547,14 @@ TEST(MultithreadingVerify, ReturnValueCorrectWithMixOfSuccessesAndFailuresUnderC
     const YAML::Node report =
         YAML::LoadFile((results_dir.path() / "comparative_report.yaml").string())["comparative_report"];
     EXPECT_EQ(extractErrors(report).size(), 2u);
+
+    // The three healthy copies are byte-identical .so files run against the same composition, so
+    // they land in one same_results group whose member order reflects each task's original,
+    // pre-load component index (not load-completion order) -- this is exactly what would break if
+    // mapping an executor task_index back to its original component index were wrong.
+    const std::vector<ResultsSummaryGroup> summary = extractResultsSummary(report);
+    ASSERT_EQ(summary.size(), 1u);
+    EXPECT_EQ(summary[0].same_results, (std::vector<std::string>{"ok_1.so", "ok_2.so", "ok_3.so"}));
 }
 
 TEST(MultithreadingVerify, ConcurrentCompetitionMultiComponentSuccessAndFailure) {
@@ -577,4 +591,81 @@ TEST(MultithreadingVerify, ConcurrentCompetitionMultiComponentSuccessAndFailure)
         }
         EXPECT_EQ(order, expected_order);
     }
+}
+
+TEST(MultithreadingVerify, AllDiscoveredLoadsFailUnderConcurrencyComparative) {
+    // Every discovered MissionControl fails to load (zero successes), while num_threads asks for
+    // far more workers than that -- ParallelExecutor must be sized off the successful-load count
+    // (0), not the discovered count (3) or num_threads (8), so it creates no worker thread at all
+    // for this run instead of spinning up threads with nothing left to do.
+    ScratchDir mc_dir("mt_verify_mc_all_fail_comparative");
+    // Deliberately out-of-alphabetical-order filenames, so a passing ordering assertion below can
+    // only be explained by an actual sort.
+    writeGarbageSo(mc_dir.path() / "zzz_bad.so");
+    writeGarbageSo(mc_dir.path() / "aaa_bad.so");
+    writeGarbageSo(mc_dir.path() / "mmm_bad.so");
+
+    ScratchDir algo_dir("mt_verify_algo_all_fail_comparative");
+    const std::filesystem::path algorithm_copy = algo_dir.path() / kAlgorithmFile.filename();
+    std::filesystem::copy_file(kAlgorithmFile, algorithm_copy);
+
+    ScratchDir compose_dir("mt_verify_compose_all_fail_comparative");
+    const std::filesystem::path compose_path = writeMinimalComposition(compose_dir.path());
+
+    ScratchDir results_dir("mt_verify_results_all_fail_comparative");
+
+    const simulator::ComparativeOptions options =
+        parseComparative({"-comparative", "simulation=" + compose_path.string(),
+                          "mission_control_folder=" + mc_dir.path().string(),
+                          "algorithm=" + algorithm_copy.string(), "num_threads=8"});
+
+    CerrCapture capture;
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
+
+    EXPECT_EQ(ran, 0u);
+    for (const std::string stem : {"aaa_bad", "mmm_bad", "zzz_bad"}) {
+        EXPECT_FALSE(std::filesystem::exists(results_dir.path() / ("simulation_output_" + stem + ".yaml")));
+    }
+
+    const YAML::Node report =
+        YAML::LoadFile((results_dir.path() / "comparative_report.yaml").string())["comparative_report"];
+    EXPECT_EQ(extractResultsSummary(report).size(), 0u);
+    EXPECT_EQ(extractErrors(report), (std::vector<std::string>{"aaa_bad.so", "mmm_bad.so", "zzz_bad.so"}));
+}
+
+TEST(MultithreadingVerify, AllDiscoveredLoadsFailUnderConcurrencyCompetition) {
+    // Symmetric to AllDiscoveredLoadsFailUnderConcurrencyComparative: every discovered Algorithm
+    // fails to load (zero successes) under num_threads=8, so ParallelExecutor must again be sized
+    // off the successful-load count (0), never the discovered count (3) or num_threads.
+    ScratchDir algo_dir("mt_verify_algo_all_fail_competition");
+    writeGarbageSo(algo_dir.path() / "zzz_bad.so");
+    writeGarbageSo(algo_dir.path() / "aaa_bad.so");
+    writeGarbageSo(algo_dir.path() / "mmm_bad.so");
+
+    ScratchDir mc_dir("mt_verify_mc_all_fail_competition");
+    const std::filesystem::path mission_control_copy = mc_dir.path() / kMissionControlFile.filename();
+    std::filesystem::copy_file(kMissionControlFile, mission_control_copy);
+
+    ScratchDir compose_dir("mt_verify_compose_all_fail_competition");
+    const std::filesystem::path compose_path = writeMinimalComposition(compose_dir.path());
+
+    ScratchDir results_dir("mt_verify_results_all_fail_competition");
+
+    const simulator::CompetitionOptions options =
+        parseCompetition({"-competition", "simulation=" + compose_path.string(),
+                          "mission_control=" + mission_control_copy.string(),
+                          "algorithms_folder=" + algo_dir.path().string(), "num_threads=8"});
+
+    CerrCapture capture;
+    const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
+
+    EXPECT_EQ(ran, 0u);
+    for (const std::string stem : {"aaa_bad", "mmm_bad", "zzz_bad"}) {
+        EXPECT_FALSE(std::filesystem::exists(results_dir.path() / ("simulation_output_" + stem + ".yaml")));
+    }
+
+    const YAML::Node report =
+        YAML::LoadFile((results_dir.path() / "competitive_report.yaml").string())["competitive_report"];
+    EXPECT_EQ(extractCompetitiveResultsSummary(report).size(), 0u);
+    EXPECT_EQ(extractErrors(report), (std::vector<std::string>{"aaa_bad.so", "mmm_bad.so", "zzz_bad.so"}));
 }

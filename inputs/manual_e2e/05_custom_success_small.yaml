@@ -1,0 +1,16 @@
+simulation_compositions:
+  simulations:
+    - simulation_config: "simulation/success_small_start_out.yaml"
+      mission_configs:
+        - "mission/safe_small_out.yaml"
+    - simulation_config: "simulation/success_small_start_room.yaml"
+      mission_configs:
+        - "mission/safe_small_room.yaml"
+
+  drone_configs:
+    - "drone/custom_agile.yaml"
+    - "drone/custom_tight.yaml"
+
+  lidar_configs:
+    - "lidar/custom_far.yaml"
+    - "lidar/custom_near.yaml"

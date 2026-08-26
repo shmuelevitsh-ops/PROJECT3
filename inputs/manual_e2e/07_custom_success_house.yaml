@@ -1,0 +1,16 @@
+simulation_compositions:
+  simulations:
+    - simulation_config: "simulation/success_house_start_a.yaml"
+      mission_configs:
+        - "mission/safe_house_full.yaml"
+    - simulation_config: "simulation/success_house_start_b.yaml"
+      mission_configs:
+        - "mission/safe_house_full.yaml"
+
+  drone_configs:
+    - "drone/custom_agile.yaml"
+    - "drone/custom_tight.yaml"
+
+  lidar_configs:
+    - "lidar/custom_far.yaml"
+    - "lidar/custom_near.yaml"

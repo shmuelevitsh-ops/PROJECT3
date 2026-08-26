@@ -71,6 +71,7 @@ common::MappingAlgorithmFactory Registrar::loadMappingAlgorithm(
     // Constructing LibraryHandle calls dlopen(); while the .so is being loaded,
     // its global registration object is constructed and registers the factory here.
     LibraryHandle library(library_path);
+
     // Count how many factories of the requested type were added by this load.
     const std::size_t mapping_registered = mapping_algorithm_factories_.size() - mapping_before;
 
@@ -111,6 +112,7 @@ common::MissionControlFactory Registrar::loadMissionControl(
     // Constructing LibraryHandle calls dlopen(); while the .so is being loaded,
     // its global registration object is constructed and registers the factory here.
     LibraryHandle library(library_path);
+    
     // Count how many factories of the requested type were added by this load.
     const std::size_t mission_registered = mission_control_factories_.size() - mission_before;
 

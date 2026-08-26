@@ -1,0 +1,74 @@
+score_report:
+  composition_file: inputs/manual_e2e/01_staff_small.yaml
+  generated_at_utc: 2026-08-26T12:05:43Z
+  metric: output_map_accuracy
+  score_range:
+    min: 0
+    max: 100
+  error_score: -1
+  summary:
+    total_runs: 8
+    scored_runs: 5
+    error_runs: 3
+    average_score: 74.40978535353536
+    min_score: 60.28125
+    max_score: 79.1919191919192
+  simulations:
+    - simulation_config: simulation/staff_small_out.yaml
+      missions:
+        - mission_config: ../mission/small_mission_out.yaml
+          resolution_cm: 10
+          resolution_request_status: IGNORED
+          runs:
+            - drone_config: ../drone/drone_small.yaml
+              lidar_config: ../lidar/lidar_long.yaml
+              status: max_steps
+              steps: 2000
+              score: 60.28125
+            - drone_config: ../drone/drone_small.yaml
+              lidar_config: ../lidar/lidar_short.yaml
+              status: error
+              steps: 0
+              score: -1
+              error_ref:
+                code: MOVEMENT_COLLISION
+            - drone_config: ../drone/drone_large.yaml
+              lidar_config: ../lidar/lidar_long.yaml
+              status: error
+              steps: 0
+              score: -1
+              error_ref:
+                code: MOVEMENT_COLLISION
+            - drone_config: ../drone/drone_large.yaml
+              lidar_config: ../lidar/lidar_short.yaml
+              status: error
+              steps: 0
+              score: -1
+              error_ref:
+                code: MOVEMENT_COLLISION
+    - simulation_config: simulation/staff_small_room.yaml
+      missions:
+        - mission_config: ../mission/small_mission_room.yaml
+          resolution_cm: 10
+          resolution_request_status: IGNORED
+          runs:
+            - drone_config: ../drone/drone_small.yaml
+              lidar_config: ../lidar/lidar_long.yaml
+              status: completed
+              steps: 563
+              score: 76.38888888888889
+            - drone_config: ../drone/drone_small.yaml
+              lidar_config: ../lidar/lidar_short.yaml
+              status: completed
+              steps: 502
+              score: 78.91414141414141
+            - drone_config: ../drone/drone_large.yaml
+              lidar_config: ../lidar/lidar_long.yaml
+              status: completed
+              steps: 566
+              score: 77.27272727272727
+            - drone_config: ../drone/drone_large.yaml
+              lidar_config: ../lidar/lidar_short.yaml
+              status: completed
+              steps: 357
+              score: 79.1919191919192

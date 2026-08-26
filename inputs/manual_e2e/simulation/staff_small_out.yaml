@@ -1,0 +1,13 @@
+simulation_config:
+  # Staff values; only map_filename is adapted to this file's directory.
+  map_filename: "../../map/scenario_small.npy"
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 150
+    y_cm: 150
+    height_cm: 110
+  initial_angle_deg: 0
+  map_axes_offset:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 0

@@ -1,0 +1,11 @@
+comparative_report:
+  composition_file: inputs/manual_e2e/01_staff_small.yaml
+  mission_control_folder: manual_e2e_runtime/mission_controls
+  generated_at_utc: 2026-08-26T12:05:43Z
+  results_summary:
+    - same_results:
+        - MissionControl_209074731_322271032.so
+        - MissionControl_322889890_315113738.so
+      total_score: 372.0489267676768
+      total_steps: 3988
+  errors: ~

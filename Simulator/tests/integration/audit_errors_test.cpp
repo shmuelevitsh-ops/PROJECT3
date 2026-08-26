@@ -218,7 +218,7 @@ TEST(Audit, MissingCompositionFileStillHaltsWithNoPerRunIsolationPossible) {
 // mission_invalid_boundary.yaml's x_boundary has min_cm (140) > max_cm (50).
 // SimulationRunFactoryImpl::outputMapConfig() -> Map3DImpl's constructor
 // throws simulator::SimulationException("MISSION_BOUNDARY_INVALID", ...)
-// (src/Map3DImpl.cpp). SimulationManager::runInternal() catches this
+// (src/Map3DImpl.cpp). SimulationManager::run() catches this
 // per-run (src/SimulationManager.cpp), so the binary exits 0, writes a
 // complete per-component YAML, and this run's own entry carries
 // status: "error" / score: -1 / error_ref.code: "MISSION_BOUNDARY_INVALID".

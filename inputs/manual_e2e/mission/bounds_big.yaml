@@ -1,0 +1,15 @@
+mission_config:
+  # With offset (-30,+20,-20), local bounds are X[100,200), Y[0,100), Z[0,120).
+  max_steps: 15000
+  boundaries:
+    x_boundary:
+      min_cm: 130
+      max_cm: 230
+    y_boundary:
+      min_cm: -20
+      max_cm: 80
+    height_boundary:
+      min_cm: 20
+      max_cm: 140
+  gps_resolution_cm: 5
+  output_mapping_resolution_factor: 1.0

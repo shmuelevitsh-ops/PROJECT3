@@ -45,24 +45,33 @@ TEST(Stage1Verify, RunsSingleCombo) {
         registrar.loadMissionControl(mission_control_copy);
     ASSERT_TRUE(mission_control_factory);
 
-    auto factory_impl = std::make_unique<simulator::SimulationRunFactoryImpl>(
-        mapping_algorithm_factory, mission_control_factory, /*verbose=*/false);
-    simulator::SimulationManager manager{std::move(factory_impl)};
-
     const std::filesystem::path inputs = TEST_INPUTS_DIR;
-    const simulator::types::SimulationConfigData simulation =
-        simulator::parseSimulationConfig(inputs / "simulation/small_simulation_out_e2e.yaml");
-    const common::types::MissionConfigData mission =
-        simulator::parseMissionConfig(inputs / "mission/small_mission_out.yaml");
-    const common::types::DroneConfigData drone =
-        simulator::parseDroneConfig(inputs / "drone/drone_small.yaml");
-    const common::types::LidarConfigData lidar =
-        simulator::parseLidarConfig(inputs / "lidar/lidar_short.yaml");
+    const std::filesystem::path simulation_path = inputs / "simulation/small_simulation_out_e2e.yaml";
+    const std::filesystem::path mission_path = inputs / "mission/small_mission_out.yaml";
+    const std::filesystem::path drone_path = inputs / "drone/drone_small.yaml";
+    const std::filesystem::path lidar_path = inputs / "lidar/lidar_short.yaml";
+
+    const simulator::types::SimulationConfigData simulation = simulator::parseSimulationConfig(simulation_path);
+    const common::types::MissionConfigData mission = simulator::parseMissionConfig(mission_path);
+    const common::types::DroneConfigData drone = simulator::parseDroneConfig(drone_path);
+    const common::types::LidarConfigData lidar = simulator::parseLidarConfig(lidar_path);
 
     simulator::types::SimulationCompositionData composition;
     composition.simulation_mission_groups.push_back({simulation, {mission}});
     composition.drone_configs.push_back(drone);
     composition.lidar_configs.push_back(lidar);
+
+    // The real config paths behind the parsed structs above, matching composition's shape exactly.
+    simulator::CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths.push_back(
+        {simulator::ReferencedConfigFile{simulation_path.string()},
+         {simulator::ReferencedConfigFile{mission_path.string()}}});
+    file_paths.drone_paths.push_back(drone_path.string());
+    file_paths.lidar_paths.push_back(lidar_path.string());
+
+    auto factory_impl = std::make_unique<simulator::SimulationRunFactoryImpl>(
+        mapping_algorithm_factory, mission_control_factory, /*verbose=*/false);
+    simulator::SimulationManager manager{std::move(factory_impl), file_paths};
 
     const std::filesystem::path output_dir =
         std::filesystem::temp_directory_path() / "simulator_stage1_verify_single";

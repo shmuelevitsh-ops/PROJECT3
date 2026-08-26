@@ -12,7 +12,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
-#include <optional>
 
 namespace simulator {
 
@@ -39,56 +38,6 @@ std::string currentUtcTimestamp() {
 
 std::string stem(const std::string& path_str) {
     return std::filesystem::path(path_str).stem().string();
-}
-
-// Builds placeholder config paths when real file paths are unavailable,
-// so each simulation run can still receive a distinct output directory.
-CompositionFilePaths buildSyntheticFilePaths(const types::SimulationCompositionData& composition) {
-
-    CompositionFilePaths file_paths;
-    for (std::size_t sim_index = 0;
-         sim_index < composition.simulation_mission_groups.size();
-         ++sim_index) {
-
-        const auto& missions = std::get<1>(composition.simulation_mission_groups[sim_index]);
-
-        std::vector<ReferencedConfigFile> mission_refs;
-        mission_refs.reserve(missions.size());
-
-        for (std::size_t mission_index = 0;
-             mission_index < missions.size();
-             ++mission_index) {
-            // Generate deterministic placeholder names for each mission in this simulation group.
-            mission_refs.push_back(ReferencedConfigFile{
-                "mission_" + std::to_string(sim_index) + "_" +
-                    std::to_string(mission_index),
-                std::nullopt});
-        }
-
-        file_paths.simulation_mission_paths.emplace_back(
-            ReferencedConfigFile{
-                "sim_" + std::to_string(sim_index),
-                std::nullopt},
-            std::move(mission_refs));
-    }
-
-    for (std::size_t drone_index = 0;
-         drone_index < composition.drone_configs.size();
-         ++drone_index) {
-
-        file_paths.drone_paths.push_back(
-            "drone_" + std::to_string(drone_index));
-    }
-
-    for (std::size_t lidar_index = 0;
-         lidar_index < composition.lidar_configs.size();
-         ++lidar_index) {
-
-        file_paths.lidar_paths.push_back(
-            "lidar_" + std::to_string(lidar_index));
-    }
-
-    return file_paths;
 }
 
 // Builds a unique output directory for one simulation run.
@@ -153,35 +102,24 @@ types::SimulationResult buildErrorResult(const types::SimulationConfigData& simu
 
 } // namespace
 
-SimulationManager::SimulationManager(std::unique_ptr<ISimulationRunFactory> run_factory)
-    : run_factory_(std::move(run_factory)) {
+SimulationManager::SimulationManager(std::unique_ptr<ISimulationRunFactory> run_factory,
+                                     CompositionFilePaths file_paths)
+    : run_factory_(std::move(run_factory)), file_paths_(std::move(file_paths)) {
     if (!run_factory_) {
         throw std::invalid_argument("SimulationManager requires a run factory.");
     }
 }
 
-types::SimulationManagerReport SimulationManager::run(const types::SimulationCompositionData& composition,
-                                                      const std::filesystem::path& output_path) {
-    return runInternal(composition, output_path, buildSyntheticFilePaths(composition));
-}
-
-types::SimulationManagerReport SimulationManager::run(const types::SimulationCompositionData& composition,
-                                                      const std::filesystem::path& output_path,
-                                                      const CompositionFilePaths& file_paths) {
-    return runInternal(composition, output_path, file_paths);
-}
-
 // Executes every simulation × mission × drone × lidar combination.
 // Converts run-level failures into -1 results and aggregates all runs into the final report.
-types::SimulationManagerReport SimulationManager::runInternal(const types::SimulationCompositionData& composition,
-                                                              const std::filesystem::path& output_path,
-                                                              const CompositionFilePaths& file_paths) {
+types::SimulationManagerReport SimulationManager::run(const types::SimulationCompositionData& composition,
+                                                      const std::filesystem::path& output_path) {
     std::vector<types::SimulationResult> runs;
     std::set<std::filesystem::path> used_leaf_dirs;
     // Create one run for every simulation × mission × drone × lidar combination.
     for (std::size_t sim_index = 0; sim_index < composition.simulation_mission_groups.size(); ++sim_index) {
         const auto& [simulation, missions] = composition.simulation_mission_groups[sim_index];
-        const auto& [sim_ref, mission_refs] = file_paths.simulation_mission_paths[sim_index];
+        const auto& [sim_ref, mission_refs] = file_paths_.simulation_mission_paths[sim_index];
         const std::string sim_stem = stem(sim_ref.path);
 
         for (std::size_t mission_index = 0; mission_index < missions.size(); ++mission_index) {
@@ -191,12 +129,12 @@ types::SimulationManagerReport SimulationManager::runInternal(const types::Simul
 
             for (std::size_t drone_index = 0; drone_index < composition.drone_configs.size(); ++drone_index) {
                 const common_types::DroneConfigData& drone = composition.drone_configs[drone_index];
-                const std::string drone_stem = stem(file_paths.drone_paths[drone_index]);
+                const std::string drone_stem = stem(file_paths_.drone_paths[drone_index]);
 
 
                 for (std::size_t lidar_index = 0; lidar_index < composition.lidar_configs.size(); ++lidar_index) {
                     const common_types::LidarConfigData& lidar = composition.lidar_configs[lidar_index];
-                    const std::string lidar_stem = stem(file_paths.lidar_paths[lidar_index]);
+                    const std::string lidar_stem = stem(file_paths_.lidar_paths[lidar_index]);
 
                     const std::filesystem::path leaf_dir =
                         uniqueLeafDir(output_path, sim_stem, mission_stem, drone_stem, lidar_stem, used_leaf_dirs);

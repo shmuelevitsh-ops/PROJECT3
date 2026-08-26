@@ -5,15 +5,21 @@
 // lidar_configs (renamed from drones/lidars -- mechanical only). More substantially,
 // SimulationConfigData/MissionConfigData no longer carry their own load_error field (moved
 // to a Simulator-local ReferencedConfigFile{path, load_error} wrapper alongside each
-// CompositionFilePaths entry, §3) -- SimulationManager::run()'s 2-arg overload always
-// builds synthetic file paths with load_error unset (buildSyntheticFilePaths() in
-// SimulationManager.cpp), so it can never exercise the load-error skip path at all
-// anymore. The three "...LoadErrorSkipsFactoryAndScoresNegativeOne(...)" tests below
-// therefore switch from setting a load_error field directly on the config (no longer
-// possible) to calling the 3-arg run() overload with an explicit CompositionFilePaths
-// whose relevant ReferencedConfigFile carries the load_error -- the load-error scenario and
-// assertions are otherwise unchanged from Project 2. Every other test's intent, inputs, and
-// assertions are preserved 1:1.
+// CompositionFilePaths entry, §3) -- the three "...LoadErrorSkipsFactoryAndScoresNegativeOne(...)"
+// tests below therefore switch from setting a load_error field directly on the config (no longer
+// possible) to constructing SimulationManager with an explicit CompositionFilePaths whose relevant
+// ReferencedConfigFile carries the load_error -- the load-error scenario and assertions are
+// otherwise unchanged from Project 2. Every other test's intent, inputs, and assertions are
+// preserved 1:1.
+//
+// Further adapted for the ISimulation-interface-only refactor: SimulationManager now takes its
+// CompositionFilePaths as required constructor state (matching the shape of every composition
+// later passed to run()) instead of accepting it as a 3rd run() argument, and run() no longer has
+// a 2-arg overload that falls back to synthetic placeholder names -- a SimulationManager must
+// always be constructed with real metadata. Every test below that used to call the 3-arg run()
+// overload now passes the same CompositionFilePaths to the constructor instead; the one test that
+// specifically exercised the removed synthetic-fallback behavior (no real file paths available) no
+// longer has anything to test and was removed rather than adapted.
 
 #include <Simulator/CerrContextGuard.h>
 #include <Simulator/SimulationException.h>
@@ -63,6 +69,21 @@ SimulationCompositionData nestedComposition() {
     return composition;
 }
 
+// Placeholder file paths matching nestedComposition()'s shape exactly (2 simulation groups with
+// 2 and 1 mission(s) respectively, 2 drones, 2 lidars) -- content is irrelevant to the tests that
+// use this helper, only the shape (matching composition dimensions) matters.
+CompositionFilePaths nestedFilePaths() {
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {
+        {ReferencedConfigFile{"sim_0.yaml"},
+         {ReferencedConfigFile{"mission_0_0.yaml"}, ReferencedConfigFile{"mission_0_1.yaml"}}},
+        {ReferencedConfigFile{"sim_1.yaml"}, {ReferencedConfigFile{"mission_1_0.yaml"}}},
+    };
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar_0.yaml", "lidar_1.yaml"};
+    return file_paths;
+}
+
 } // namespace
 
 TEST(SimulationManager, RunCallsFactoryCreateOncePerCartesianCombinationAcrossNestedGroups) {
@@ -76,7 +97,7 @@ TEST(SimulationManager, RunCallsFactoryCreateOncePerCartesianCombinationAcrossNe
             return std::unique_ptr<ISimulationRun>(std::move(run));
         }));
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), nestedFilePaths());
     const SimulationManagerReport report = manager.run(nestedComposition(), "tests/component/test_output");
 
     EXPECT_EQ(report.runs.size(), kExpectedCreateCalls);
@@ -97,7 +118,7 @@ TEST(SimulationManager, RunReturnsResultsMatchingMockReturnValuesInOrder) {
             return std::unique_ptr<ISimulationRun>(std::move(run));
         }));
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), nestedFilePaths());
     const SimulationManagerReport report = manager.run(nestedComposition(), "tests/component/test_output");
 
     ASSERT_EQ(report.runs.size(), kExpectedCreateCalls);
@@ -108,7 +129,7 @@ TEST(SimulationManager, RunReturnsResultsMatchingMockReturnValuesInOrder) {
 }
 
 TEST(SimulationManager, ConstructorThrowsIfRunFactoryIsNull) {
-    EXPECT_THROW(SimulationManager manager(nullptr), std::invalid_argument);
+    EXPECT_THROW(SimulationManager manager(nullptr, CompositionFilePaths{}), std::invalid_argument);
 }
 
 // New — closes a Project 2 mutation-coverage gap (MAN27, see
@@ -122,6 +143,12 @@ TEST(SimulationManager, ScoreRangeMinStaysZeroEvenWhenBatchContainsErrorRuns) {
     };
     composition.drone_configs = {DroneConfigData{}};
     composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {
+        {ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission_a.yaml"}, ReferencedConfigFile{"mission_b.yaml"}}}};
+    file_paths.drone_paths = {"drone.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
 
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     bool first_call = true;
@@ -138,7 +165,7 @@ TEST(SimulationManager, ScoreRangeMinStaysZeroEvenWhenBatchContainsErrorRuns) {
             return std::unique_ptr<ISimulationRun>(std::move(run));
         }));
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report = manager.run(
         composition, "tests/component/test_output/simulation_manager_test/score_range_min");
 
@@ -161,7 +188,7 @@ TEST(SimulationManager, PopulatesFixedMetadataAndFreshUtcTimestamp) {
     }));
 
     const std::time_t before = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), nestedFilePaths());
     const SimulationManagerReport report = manager.run(nestedComposition(), "tests/component/test_output");
     const std::time_t after = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
@@ -181,7 +208,7 @@ TEST(SimulationManager, PopulatesFixedMetadataAndFreshUtcTimestamp) {
     EXPECT_LE(parsed_time, after);
 }
 
-TEST(SimulationManager, ThreeArgRunNamesOutputDirectoriesFromRealConfigFileStems) {
+TEST(SimulationManager, RunNamesOutputDirectoriesFromConstructorSuppliedRealConfigFileStems) {
     CompositionFilePaths file_paths;
     file_paths.simulation_mission_paths = {
         {ReferencedConfigFile{"sims/sim_a.yaml"},
@@ -207,8 +234,8 @@ TEST(SimulationManager, ThreeArgRunNamesOutputDirectoriesFromRealConfigFileStems
     const std::filesystem::path output_root = "tests/component/test_output/simulation_manager_test/path_shape";
     std::filesystem::remove_all(output_root);
 
-    SimulationManager manager(std::move(factory));
-    (void)manager.run(nestedComposition(), output_root, file_paths);
+    SimulationManager manager(std::move(factory), file_paths);
+    (void)manager.run(nestedComposition(), output_root);
 
     ASSERT_EQ(observed_output_paths.size(), kExpectedCreateCalls);
     // Loop order: sim_a/mission_x then sim_a/mission_y then sim_b/mission_z, each x drone_one
@@ -235,32 +262,6 @@ TEST(SimulationManager, ThreeArgRunNamesOutputDirectoriesFromRealConfigFileStems
              output_root / "simulations" / "sim_a" / "mission_y" / "drone_one__lidar_one");
     EXPECT_EQ(observed_output_paths[11],
              output_root / "simulations" / "sim_b" / "mission_z" / "drone_two__lidar_two");
-}
-
-TEST(SimulationManager, TwoArgRunFallsBackToSyntheticPositionalDirectoryNamesWithoutFilePaths) {
-    std::vector<std::filesystem::path> observed_output_paths;
-    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
-    ON_CALL(*factory, create(_, _, _, _, _))
-        .WillByDefault(Invoke([&observed_output_paths](const SimulationConfigData&, const MissionConfigData&,
-                                                        const DroneConfigData&, const LidarConfigData&,
-                                                        const std::filesystem::path& output_path) {
-            observed_output_paths.push_back(output_path);
-            auto run = std::make_unique<NiceMock<test::GMockISimulationRun>>();
-            ON_CALL(*run, run()).WillByDefault(Return(SimulationResult{}));
-            return std::unique_ptr<ISimulationRun>(std::move(run));
-        }));
-
-    const std::filesystem::path output_root = "tests/component/test_output/simulation_manager_test/synthetic_names";
-    std::filesystem::remove_all(output_root);
-
-    SimulationManager manager(std::move(factory));
-    (void)manager.run(nestedComposition(), output_root); // 2-arg overload has no real file paths.
-
-    ASSERT_EQ(observed_output_paths.size(), kExpectedCreateCalls);
-    EXPECT_EQ(observed_output_paths[0], output_root / "simulations" / "sim_0" / "mission_0_0" / "drone_0__lidar_0");
-    // Every directory must still be distinct -- no two runs should collide even with placeholder names.
-    const std::set<std::filesystem::path> unique_paths(observed_output_paths.begin(), observed_output_paths.end());
-    EXPECT_EQ(unique_paths.size(), observed_output_paths.size());
 }
 
 TEST(SimulationManager, DisambiguatesOutputDirectoriesWhenTwoRunsWouldShareTheSameLeafName) {
@@ -297,8 +298,8 @@ TEST(SimulationManager, DisambiguatesOutputDirectoriesWhenTwoRunsWouldShareTheSa
     const std::filesystem::path output_root = "tests/component/test_output/simulation_manager_test/collision";
     std::filesystem::remove_all(output_root);
 
-    SimulationManager manager(std::move(factory));
-    (void)manager.run(composition, output_root, file_paths);
+    SimulationManager manager(std::move(factory), file_paths);
+    (void)manager.run(composition, output_root);
 
     ASSERT_EQ(observed_output_paths.size(), 2u);
     const std::filesystem::path expected_first =
@@ -371,8 +372,8 @@ TEST(SimulationManager, PrefixesCerrLinesWrittenDuringARunWithThatRunsContextAnd
         const CerrSinkGuard sink_guard(captured.rdbuf());
         std::cerr << "before any run\n";
 
-        SimulationManager manager(std::move(factory));
-        (void)manager.run(composition, output_root, file_paths);
+        SimulationManager manager(std::move(factory), file_paths);
+        (void)manager.run(composition, output_root);
 
         std::cerr << "after every run\n";
         log = captured.str();
@@ -399,7 +400,7 @@ TEST(SimulationManager, PrefixesCerrLinesWrittenDuringARunWithThatRunsContextAnd
 // A simulation_config/mission_config that failed to load/parse is represented by its
 // CompositionFilePaths entry carrying a load_error (§3/§7.2 -- Project 2's SimulationConfigData/
 // MissionConfigData carried load_error directly; Project 3 moved it out into
-// ReferencedConfigFile, so these three tests drive the 3-arg run() overload with an explicit
+// ReferencedConfigFile, so these three tests construct SimulationManager with an explicit
 // CompositionFilePaths instead of setting a field on the config). SimulationManager must
 // recognize this *before* ever calling the factory (the group/mission's config is otherwise
 // meaningless) and score it -1 directly. A bug here (e.g. checking the wrong field, or calling
@@ -422,9 +423,9 @@ TEST(SimulationManager, SimulationLoadErrorSkipsFactoryAndScoresNegativeOne) {
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     EXPECT_CALL(*factory, create(_, _, _, _, _)).Times(0);
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report = manager.run(
-        composition, "tests/component/test_output/simulation_manager_test/sim_load_error", file_paths);
+        composition, "tests/component/test_output/simulation_manager_test/sim_load_error");
 
     ASSERT_EQ(report.runs.size(), 1u);
     EXPECT_EQ(report.runs[0].mission_score, -1.0);
@@ -451,9 +452,9 @@ TEST(SimulationManager, MissionLoadErrorSkipsFactoryAndScoresNegativeOne) {
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     EXPECT_CALL(*factory, create(_, _, _, _, _)).Times(0);
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report = manager.run(
-        composition, "tests/component/test_output/simulation_manager_test/mission_load_error", file_paths);
+        composition, "tests/component/test_output/simulation_manager_test/mission_load_error");
 
     ASSERT_EQ(report.runs.size(), 1u);
     EXPECT_EQ(report.runs[0].mission_score, -1.0);
@@ -466,7 +467,7 @@ TEST(SimulationManager, MissionLoadErrorSkipsFactoryAndScoresNegativeOne) {
 
 TEST(SimulationManager, LoadErrorRunStillReportsOutputResolutionFromSimulationConfig) {
     // Even a -1 placeholder run must report the resolution the hidden map was configured with
-    // (mirrors SimulationRunFactoryImpl::outputMapResolution()'s formula:
+    // (mirrors SimulationRunFactoryImpl::outputMapConfig()'s formula:
     // simulation_config.map_resolution), not a meaningless default-zero -- SimulationOutputWriter
     // reads this field off whichever run it sees first for a mission, including an error run.
     // outputMapResolution() no longer consults the mission's requested factor at all (only
@@ -492,9 +493,9 @@ TEST(SimulationManager, LoadErrorRunStillReportsOutputResolutionFromSimulationCo
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     EXPECT_CALL(*factory, create(_, _, _, _, _)).Times(0);
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report = manager.run(
-        composition, "tests/component/test_output/simulation_manager_test/load_error_resolution", file_paths);
+        composition, "tests/component/test_output/simulation_manager_test/load_error_resolution");
 
     ASSERT_EQ(report.runs.size(), 1u);
     EXPECT_EQ(report.runs[0].output_map_config.resolution, 20.0 * isq::length[cm])
@@ -515,6 +516,11 @@ TEST(SimulationManager, ExceptionFromFactoryCreateIsCaughtScoredNegativeOneAndDo
     composition.drone_configs = {DroneConfigData{}, DroneConfigData{}}; // 2 runs total
     composition.lidar_configs = {LidarConfigData{}};
 
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     {
         ::testing::InSequence seq;
@@ -529,7 +535,7 @@ TEST(SimulationManager, ExceptionFromFactoryCreateIsCaughtScoredNegativeOneAndDo
             }));
     }
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report =
         manager.run(composition, "tests/component/test_output/simulation_manager_test/factory_throws");
 
@@ -549,6 +555,11 @@ TEST(SimulationManager, ExceptionFromRunRunUsesGenericErrorCodeForNonSimulationE
     composition.drone_configs = {DroneConfigData{}};
     composition.lidar_configs = {LidarConfigData{}};
 
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     ON_CALL(*factory, create(_, _, _, _, _))
         .WillByDefault(Invoke([](const SimulationConfigData&, const MissionConfigData&, const DroneConfigData&,
@@ -558,7 +569,7 @@ TEST(SimulationManager, ExceptionFromRunRunUsesGenericErrorCodeForNonSimulationE
             return std::unique_ptr<ISimulationRun>(std::move(run));
         }));
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), file_paths);
     const SimulationManagerReport report =
         manager.run(composition, "tests/component/test_output/simulation_manager_test/run_throws_generic");
 
@@ -579,7 +590,7 @@ TEST(SimulationManager, EmptyCompositionProducesNoRunsAndDoesNotCrash) {
     auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
     EXPECT_CALL(*factory, create(_, _, _, _, _)).Times(0);
 
-    SimulationManager manager(std::move(factory));
+    SimulationManager manager(std::move(factory), CompositionFilePaths{}); // empty, matches composition's shape
     const SimulationManagerReport report =
         manager.run(composition, "tests/component/test_output/simulation_manager_test/empty_composition");
 

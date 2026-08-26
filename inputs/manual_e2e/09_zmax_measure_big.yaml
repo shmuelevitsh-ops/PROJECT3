@@ -1,0 +1,12 @@
+simulation_compositions:
+  simulations:
+    - simulation_config: "simulation/staff_big_out.yaml"
+      mission_configs:
+        - "mission/safe_big_out.yaml"
+
+  drone_configs:
+    - "drone/custom_agile.yaml"
+
+  lidar_configs:
+    - "lidar/custom_far.yaml"
+    - "lidar/custom_near.yaml"

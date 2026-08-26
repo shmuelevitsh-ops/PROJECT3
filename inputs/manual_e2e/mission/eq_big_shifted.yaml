@@ -1,0 +1,14 @@
+mission_config:
+  # Equivalent to staff large_room after adding offset (40,-30,-10).
+  max_steps: 500
+  boundaries:
+    x_boundary:
+      min_cm: 50
+      max_cm: 170
+    y_boundary:
+      min_cm: 30
+      max_cm: 150
+    height_boundary:
+      min_cm: 10
+      max_cm: 160
+  gps_resolution_cm: 5

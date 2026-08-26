@@ -46,10 +46,11 @@ void runOneComponent(const std::string& component_name, const std::string& compo
     try {
         auto factory_impl = std::make_unique<SimulationRunFactoryImpl>(
             mapping_algorithm_factory, mission_control_factory, verbose);
-        SimulationManager manager{std::move(factory_impl)};
+
+        SimulationManager manager{std::move(factory_impl), parsed.file_paths};
 
         const types::SimulationManagerReport report =
-            manager.run(parsed.composition, results_dir / component_stem, parsed.file_paths);
+            manager.run(parsed.composition, results_dir / component_stem);
 
         writeSimulationOutput(report, parsed.file_paths,
                               results_dir / ("simulation_output_" + component_stem + ".yaml"));
@@ -97,15 +98,16 @@ std::size_t Simulator::runComparative() const {
     const std::vector<std::filesystem::path> mission_control_libraries =
         sortedByFilename(options.mission_control_libraries);
 
-    // Preallocate one result slot per MissionControl so both the preload loop below and the
-    // workers after it can write by index.
+    // Preallocate one result slot per MissionControl so the preload loop below, and later the
+    // workers, can write by original component index.
     std::vector<ComponentOutcome> outcomes(mission_control_libraries.size());
 
     // Load every MissionControl sequentially, on the calling thread, before any worker thread
-    // starts -- Registrar is not safe to call concurrently. A load failure affects only that one
-    // component: its outcome stays a failure (empty totals) and it is simply skipped below.
-    std::vector<std::optional<common::MissionControlFactory>> mission_control_factories(
-        mission_control_libraries.size());
+    // starts. A load failure affects only that one component: its outcome stays a failure (empty
+    // totals) and it is simply left out of loaded_indices/loaded_mission_controls below, so no
+    // worker thread is ever created to do nothing for it.
+    std::vector<std::size_t> loaded_indices; // original component index of each successful load, ascending
+    std::vector<common::MissionControlFactory> loaded_mission_controls; // aligned with loaded_indices
     for (std::size_t index = 0; index < mission_control_libraries.size(); ++index) {
         const std::filesystem::path& library_path = mission_control_libraries[index];
         outcomes[index].component_name = library_path.filename().string();
@@ -113,7 +115,8 @@ std::size_t Simulator::runComparative() const {
 
         const CerrContextGuard component_guard("component=" + component_name);
         try {
-            mission_control_factories[index] = Registrar::instance().loadMissionControl(library_path);
+            loaded_mission_controls.push_back(Registrar::instance().loadMissionControl(library_path));
+            loaded_indices.push_back(index);
         } catch (const std::exception& e) {
             // A load failure affects only this component, so the remaining components can continue.
             std::cerr << "failed to load " << component_name << ": " << e.what() << '\n';
@@ -121,15 +124,14 @@ std::size_t Simulator::runComparative() const {
     }
 
     // Process every already-loaded MissionControl, sequentially or with workers according to
-    // num_threads. Workers only run already-loaded components; no plugin loading happens here.
+    // num_threads. Only successfully loaded components are handed to the executor, so it never
+    // sizes its worker pool for components that failed to load and have nothing left to run.
     const ParallelExecutor executor(options.num_threads);
-    executor.run(mission_control_libraries.size(), [&](std::size_t index) {
-        // [&] gives the lambda reference access to the surrounding scope variables it uses,
-        // so the executor only needs to pass the current index.
-        if (!mission_control_factories[index]) {
-            return; // this component's load already failed above; its outcome already reflects it
-        }
-
+    
+    executor.run(loaded_indices.size(), [&](std::size_t task_index) {
+        // task_index is a position into loaded_indices/loaded_mission_controls; index is that
+        // component's original, deterministic position in mission_control_libraries/outcomes.
+        const std::size_t index = loaded_indices[task_index];
         const std::filesystem::path& library_path = mission_control_libraries[index];
         const std::string& component_name = outcomes[index].component_name;
         const std::string component_stem = library_path.stem().string();
@@ -139,7 +141,7 @@ std::size_t Simulator::runComparative() const {
 
         // Run the whole composition using the fixed Algorithm and this MissionControl.
         runOneComponent(component_name, component_stem, parsed, results_dir_, mapping_algorithm_factory,
-                        *mission_control_factories[index], options.verbose, outcomes[index]);
+                        loaded_mission_controls[task_index], options.verbose, outcomes[index]);
     });
 
     // Split completed components into successful totals and failures.
@@ -165,15 +167,16 @@ std::size_t Simulator::runCompetition() const {
         Registrar::instance().loadMissionControl(options.mission_control_so_file);
     // The Algorithms are the components being compared in competition mode.
     const std::vector<std::filesystem::path> algorithm_libraries = sortedByFilename(options.algorithm_libraries);
-    // Preallocate one result slot per Algorithm so both the preload loop below and the workers
-    // after it can write by index.
+    // Preallocate one result slot per Algorithm so the preload loop below, and later the workers,
+    // can write by original component index.
     std::vector<ComponentOutcome> outcomes(algorithm_libraries.size());
 
-    // Load every Algorithm sequentially, on the calling thread, before any worker thread starts --
-    // Registrar is not safe to call concurrently. A load failure affects only that one component:
-    // its outcome stays a failure (empty totals) and it is simply skipped below.
-    std::vector<std::optional<common::MappingAlgorithmFactory>> mapping_algorithm_factories(
-        algorithm_libraries.size());
+    // Load every Algorithm sequentially, on the calling thread, before any worker thread starts.
+    // A load failure affects only that one component: its outcome stays a failure (empty totals)
+    // and it is simply left out of loaded_indices/loaded_mapping_algorithms below, so no worker
+    // thread is ever created to do nothing for it.
+    std::vector<std::size_t> loaded_indices; // original component index of each successful load, ascending
+    std::vector<common::MappingAlgorithmFactory> loaded_mapping_algorithms; // aligned with loaded_indices
     for (std::size_t index = 0; index < algorithm_libraries.size(); ++index) {
         const std::filesystem::path& library_path = algorithm_libraries[index];
         outcomes[index].component_name = library_path.filename().string();
@@ -181,7 +184,8 @@ std::size_t Simulator::runCompetition() const {
 
         const CerrContextGuard component_guard("component=" + component_name);
         try {
-            mapping_algorithm_factories[index] = Registrar::instance().loadMappingAlgorithm(library_path);
+            loaded_mapping_algorithms.push_back(Registrar::instance().loadMappingAlgorithm(library_path));
+            loaded_indices.push_back(index);
         } catch (const std::exception& e) {
             // A load failure affects only this component, so the remaining components can continue.
             std::cerr << "failed to load " << component_name << ": " << e.what() << '\n';
@@ -189,15 +193,14 @@ std::size_t Simulator::runCompetition() const {
     }
 
     // Process every already-loaded Algorithm, sequentially or with workers according to
-    // num_threads. Workers only run already-loaded components; no plugin loading happens here.
+    // num_threads. Only successfully loaded components are handed to the executor, so it never
+    // sizes its worker pool for components that failed to load and have nothing left to run.
     const ParallelExecutor executor(options.num_threads);
-    executor.run(algorithm_libraries.size(), [&](std::size_t index) {
-        // [&] gives the lambda reference access to the surrounding scope variables it uses,
-        // so the executor only needs to pass the current index.
-        if (!mapping_algorithm_factories[index]) {
-            return; // this component's load already failed above; its outcome already reflects it
-        }
-
+    
+    executor.run(loaded_indices.size(), [&](std::size_t task_index) {
+        // task_index is a position into loaded_indices/loaded_mapping_algorithms; index is that
+        // component's original, deterministic position in algorithm_libraries/outcomes.
+        const std::size_t index = loaded_indices[task_index];
         const std::filesystem::path& library_path = algorithm_libraries[index];
         const std::string& component_name = outcomes[index].component_name;
         const std::string component_stem = library_path.stem().string();
@@ -205,7 +208,7 @@ std::size_t Simulator::runCompetition() const {
         const CerrContextGuard component_guard("component=" + component_name);
 
         // Run the whole composition using this Algorithm and the fixed MissionControl.
-        runOneComponent(component_name, component_stem, parsed, results_dir_, *mapping_algorithm_factories[index],
+        runOneComponent(component_name, component_stem, parsed, results_dir_, loaded_mapping_algorithms[task_index],
                         mission_control_factory, options.verbose, outcomes[index]);
     });
 
