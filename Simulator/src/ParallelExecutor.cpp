@@ -1,0 +1,62 @@
+#include <Simulator/ParallelExecutor.h>
+
+#include <algorithm>
+#include <atomic>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace simulator {
+
+ParallelExecutor::ParallelExecutor(std::optional<int> num_threads) : num_threads_(std::move(num_threads)) {}
+
+std::size_t ParallelExecutor::computeWorkerCount(std::size_t work_items) const {
+    if (!num_threads_.has_value() || *num_threads_ <= 1 || work_items <= 1) {
+        return 0;
+    }
+    return std::min<std::size_t>(static_cast<std::size_t>(*num_threads_), work_items);
+}
+
+void ParallelExecutor::run(std::size_t item_count, const std::function<void(std::size_t)>& task) const {
+    const std::size_t worker_count = computeWorkerCount(item_count);
+    if (worker_count == 0) {
+        for (std::size_t i = 0; i < item_count; ++i) {
+            try {
+                task(i);
+            } catch (...) {
+                // Isolate an unexpected failure to this task so later tasks can still run.
+            }
+        }
+        return;
+    }
+
+    // Index of the next task not yet assigned to a worker.
+    // Atomic access prevents a data race between workers.
+    std::atomic<std::size_t> next{0};
+    std::vector<std::jthread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t t = 0; t < worker_count; ++t) {
+        // Creates a worker thread and stores it in the vector.
+        // Each worker handles multiple tasks instead of creating a new thread per task.
+        workers.emplace_back([&next, item_count, &task]() {
+            // This lambda is the function executed by each worker thread.
+            for (;;) {
+                // Atomically take the next (unique) task index.
+                const std::size_t i = next.fetch_add(1);
+                if (i >= item_count) {
+                    break;
+                }
+                try {
+                    task(i);
+                } catch (...) {
+                    // Prevent an unexpected exception from escaping the worker thread
+                    // and terminating the entire process.
+                }
+            }
+        });
+    }
+    // Returning from here destroys the workers vector, and every std::jthread in it joins
+    // its thread, so run() returns only after all tasks have finished.
+}
+
+} // namespace simulator

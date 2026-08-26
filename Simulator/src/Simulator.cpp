@@ -1,7 +1,8 @@
-#include <Simulator/SimulatorRunner.h>
+#include <Simulator/Simulator.h>
 
 #include <Simulator/CerrContextGuard.h>
 #include <Simulator/ConfigLoader.h>
+#include <Simulator/ParallelExecutor.h>
 #include <Simulator/Registrar.h>
 #include <Simulator/SimulationManager.h>
 #include <Simulator/SimulationOutputWriter.h>
@@ -11,11 +12,9 @@
 #include <Common/MissionControlFactory.h>
 
 #include <algorithm>
-#include <atomic>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <utility>
 
 namespace simulator {
@@ -36,49 +35,6 @@ struct ComponentOutcome {
     std::string component_name;
     std::optional<ComponentRunTotals> totals; // set only if this component ran successfully
 };
-
-// Runs process(index) for every item.
-// Uses the calling thread when worker_count is 0, otherwise distributes work among worker threads.
-// Template allows process to be any function or lambda.
-// F&& accepts the given function or lambda directly, without an unnecessary copy.
-template <typename F>
-void runIndexed(std::size_t item_count, std::size_t worker_count, F&& process) {
-    if (worker_count == 0) {
-        for (std::size_t i = 0; i < item_count; ++i) {
-            try {
-            process(i);
-            } catch (...) {
-                // Isolate an unexpected failure to this task so later tasks can still run.
-            }
-        }
-        return;
-    }
-    // Index of the next task not yet assigned to a worker.
-    // Atomic access prevents a data race between workers.
-    std::atomic<std::size_t> next{0};
-    std::vector<std::jthread> workers;
-    workers.reserve(worker_count);
-    for (std::size_t t = 0; t < worker_count; ++t) {
-        // Creates a worker thread and stores it in the vector.
-        // Each worker handles multiple tasks instead of creating a new thread per task.
-        workers.emplace_back([&next, item_count, &process]() {
-            // This lambda is the function executed by each worker thread.
-            for (;;) {
-                // Atomically take the next (unique) task index.
-                const std::size_t i = next.fetch_add(1);
-                if (i >= item_count) {
-                    break;
-                }
-                try {
-                    process(i);
-                } catch (...) {
-                        // Prevent an unexpected exception from escaping the worker thread
-                        // and terminating the entire process.
-                    }
-            }
-        });
-    }
-}
 
 // Runs one loaded component, writes its output, and stores its totals.
 // On failure, logs the error and leaves outcome.totals empty.
@@ -117,16 +73,8 @@ void aggregateOutcomes(std::vector<ComponentOutcome>& outcomes, std::vector<Comp
 
 } // namespace
 
-// Determines how many worker threads to use.
-// Returns 0 when the work should run sequentially on the calling thread.
-std::size_t computeWorkerCount(const std::optional<int>& num_threads, std::size_t work_items) {
-    if (!num_threads.has_value() || *num_threads <= 1 || work_items <= 1) {
-        return 0;
-    }
-    return std::min<std::size_t>(static_cast<std::size_t>(*num_threads), work_items);
-}
-
-std::size_t runComparative(const ComparativeOptions& options, const std::filesystem::path& results_dir) {
+std::size_t Simulator::runComparative(const ComparativeOptions& options,
+                                      const std::filesystem::path& results_dir) const {
     // Parse the shared simulation composition once for all MissionControls.
     const ParsedComposition parsed = parseCompositionData(options.simulation_composition_file);
 
@@ -140,13 +88,12 @@ std::size_t runComparative(const ComparativeOptions& options, const std::filesys
 
     // Preallocate one result slot per MissionControl so workers can write by index.
     std::vector<ComponentOutcome> outcomes(mission_control_libraries.size());
-    const std::size_t worker_count =
-        computeWorkerCount(options.num_threads, mission_control_libraries.size());
-    
-    // Process every MissionControl, sequentially or with workers according to worker_count.
-    runIndexed(mission_control_libraries.size(), worker_count, [&](std::size_t index) {
+
+    // Process every MissionControl, sequentially or with workers according to num_threads.
+    const ParallelExecutor executor(options.num_threads);
+    executor.run(mission_control_libraries.size(), [&](std::size_t index) {
         // [&] gives the lambda reference access to the surrounding scope variables it uses,
-        // so runIndexed only needs to pass the current index.
+        // so the executor only needs to pass the current index.
         // Each call processes one MissionControl selected by its index.
         const std::filesystem::path& library_path = mission_control_libraries[index];
         // Store the component identity for reporting success or failure.
@@ -183,7 +130,8 @@ std::size_t runComparative(const ComparativeOptions& options, const std::filesys
     return totals.size();
 }
 
-std::size_t runCompetition(const CompetitionOptions& options, const std::filesystem::path& results_dir) {
+std::size_t Simulator::runCompetition(const CompetitionOptions& options,
+                                      const std::filesystem::path& results_dir) const {
     // Parse the shared simulation composition once for all Algorithms.
     const ParsedComposition parsed = parseCompositionData(options.simulation_composition_file);
 
@@ -194,12 +142,12 @@ std::size_t runCompetition(const CompetitionOptions& options, const std::filesys
     const std::vector<std::filesystem::path> algorithm_libraries = sortedByFilename(options.algorithm_libraries);
     // Preallocate one result slot per Algorithm so workers can write by index.
     std::vector<ComponentOutcome> outcomes(algorithm_libraries.size());
-    const std::size_t worker_count = computeWorkerCount(options.num_threads, algorithm_libraries.size());
 
-    // Process every Algorithm, sequentially or with workers according to worker_count.
-    runIndexed(algorithm_libraries.size(), worker_count, [&](std::size_t index) {
+    // Process every Algorithm, sequentially or with workers according to num_threads.
+    const ParallelExecutor executor(options.num_threads);
+    executor.run(algorithm_libraries.size(), [&](std::size_t index) {
         // [&] gives the lambda reference access to the surrounding scope variables it uses,
-        // so runIndexed only needs to pass the current index.
+        // so the executor only needs to pass the current index.
 
         // Each call processes one Algorithm selected by its index.
         const std::filesystem::path& library_path = algorithm_libraries[index];

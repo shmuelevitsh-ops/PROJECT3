@@ -16,7 +16,7 @@
 // scanned for candidate .so plugins and the results directory
 // (`comparative_results_<timestamp>`) is auto-created by the binary itself
 // directly under that folder; there is no caller-specified output path at all
-// (CliOptions.cpp/SimulatorRunner.cpp, built in an earlier Project 3 stage per
+// (CliOptions.cpp/Simulator.cpp, built in an earlier Project 3 stage per
 // SIMULATOR_CORE_PLAN.md). This was only discovered while running these tests
 // here, since no earlier migration phase ever spawned the actual compiled
 // binary. Every subprocess-spawning test below now runs -comparative mode

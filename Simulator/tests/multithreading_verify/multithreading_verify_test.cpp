@@ -1,6 +1,6 @@
 // Permanent coverage for Stage 2 of MULTI_THREADS_PLAN.md, merged into
-// simulator_registration_test -- exercises simulator::computeWorkerCount directly, and
-// simulator::runComparative/runCompetition under num_threads >= 2 against the scenarios
+// simulator_registration_test -- exercises simulator::ParallelExecutor's worker-count semantics
+// directly, and Simulator::runComparative/runCompetition under num_threads >= 2 against the scenarios
 // enumerated in the plan's Stage 2 "Verify" section: concurrent execution reproduces the exact
 // same deterministic results_summary/errors ordering as sequential execution (for both comparative
 // and competitive mode), fewer components than requested threads doesn't crash or hang, a
@@ -33,7 +33,8 @@
 
 #include <Simulator/CerrContextGuard.h>
 #include <Simulator/CliOptions.h>
-#include <Simulator/SimulatorRunner.h>
+#include <Simulator/ParallelExecutor.h>
+#include <Simulator/Simulator.h>
 
 #include <yaml-cpp/yaml.h>
 
@@ -43,9 +44,12 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -196,7 +200,7 @@ std::vector<CompetitiveResultEntry> extractCompetitiveResultsSummary(const YAML:
 
 // Builds one complete, self-contained scratch setup (its own mission_control_folder with
 // `mc_filenames` copies plus its own fixed algorithm .so copy, per the Registrar one-load-per-path
-// constraint above) and runs simulator::runComparative against it, writing results into
+// constraint above) and runs Simulator::runComparative against it, writing results into
 // `results_dir` (owned by the caller, so it survives after this function's own scratch
 // directories -- which are no longer needed once runComparative has returned -- are cleaned up).
 std::size_t runComparativeScratch(const std::string& tag, const std::optional<int>& num_threads,
@@ -221,7 +225,7 @@ std::size_t runComparativeScratch(const std::string& tag, const std::optional<in
     const simulator::ComparativeOptions options = parseComparative(args);
 
     CerrCapture capture;
-    return simulator::runComparative(options, results_dir);
+    return simulator::Simulator().runComparative(options, results_dir);
 }
 
 // Symmetric to runComparativeScratch, but for runCompetition: builds one complete, self-contained
@@ -248,18 +252,66 @@ std::size_t runCompetitionScratchMixed(const std::string& tag, const std::filesy
                           "algorithms_folder=" + algo_dir.path().string(), "num_threads=4"});
 
     CerrCapture capture;
-    return simulator::runCompetition(options, results_dir);
+    return simulator::Simulator().runCompetition(options, results_dir);
+}
+
+// What one traceExecution() call observed while its tasks ran.
+struct ExecutionTrace {
+    std::size_t tasks_run = 0;                 // total task invocations
+    std::set<std::size_t> indices;             // distinct indices the executor handed out
+    std::set<std::thread::id> threads;         // distinct threads the tasks ran on
+};
+
+// Runs item_count do-nothing tasks through a ParallelExecutor built with num_threads.
+// How many workers the executor decides to use is an internal detail of the class, so it is
+// verified through its only observable effect: which threads the tasks actually ran on.
+ExecutionTrace traceExecution(const std::optional<int>& num_threads, std::size_t item_count) {
+    ExecutionTrace trace;
+    std::mutex mutex; // the tasks run concurrently, so the trace needs its own synchronization
+    const simulator::ParallelExecutor executor(num_threads);
+    executor.run(item_count, [&](std::size_t index) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        ++trace.tasks_run;
+        trace.indices.insert(index);
+        trace.threads.insert(std::this_thread::get_id());
+    });
+    return trace;
 }
 
 } // namespace
 
-TEST(SimulatorRunnerVerify, ComputeWorkerCount) {
-    EXPECT_EQ(simulator::computeWorkerCount(std::nullopt, 5), 0u);
-    EXPECT_EQ(simulator::computeWorkerCount(1, 5), 0u);
-    EXPECT_EQ(simulator::computeWorkerCount(5, 1), 0u); // the critical never-total-2 case
-    EXPECT_EQ(simulator::computeWorkerCount(4, 1), 0u);
-    EXPECT_EQ(simulator::computeWorkerCount(4, 10), 4u);
-    EXPECT_EQ(simulator::computeWorkerCount(20, 10), 10u);
+TEST(ParallelExecutorVerify, WorkerCountSemantics) {
+    const std::thread::id caller = std::this_thread::get_id();
+
+    // No thread count requested, or only one thread: everything runs on the calling thread.
+    for (const std::optional<int>& num_threads : {std::optional<int>{}, std::optional<int>{1}}) {
+        const ExecutionTrace sequential = traceExecution(num_threads, 5);
+        EXPECT_EQ(sequential.indices.size(), 5u);
+        EXPECT_EQ(sequential.threads, (std::set<std::thread::id>{caller}));
+    }
+
+    // A single work item never spawns a worker, whatever num_threads asks for
+    // (the critical never-total-2 case).
+    for (const int num_threads : {4, 5}) {
+        const ExecutionTrace single = traceExecution(num_threads, 1);
+        EXPECT_EQ(single.indices.size(), 1u);
+        EXPECT_EQ(single.threads, (std::set<std::thread::id>{caller}));
+    }
+
+    // More items than threads: the workers do all the work, and there are never more of them
+    // than num_threads asked for.
+    const ExecutionTrace capped_by_threads = traceExecution(4, 10);
+    EXPECT_EQ(capped_by_threads.tasks_run, 10u);
+    EXPECT_EQ(capped_by_threads.indices.size(), 10u);
+    EXPECT_LE(capped_by_threads.threads.size(), 4u);
+    EXPECT_EQ(capped_by_threads.threads.count(caller), 0u);
+
+    // More threads than items: the worker count is capped by the number of items.
+    const ExecutionTrace capped_by_items = traceExecution(20, 10);
+    EXPECT_EQ(capped_by_items.tasks_run, 10u);
+    EXPECT_EQ(capped_by_items.indices.size(), 10u);
+    EXPECT_LE(capped_by_items.threads.size(), 10u);
+    EXPECT_EQ(capped_by_items.threads.count(caller), 0u);
 }
 
 TEST(MultithreadingVerify, ConcurrentMultiComponentMatchesSequentialDeterministicOrder) {
@@ -336,7 +388,7 @@ TEST(MultithreadingVerify, RunWritePhaseFailureIsolatesOneComponentUnderConcurre
                           "algorithm=" + algorithm_copy.string(), "num_threads=4"});
 
     CerrCapture capture;
-    const std::size_t ran = simulator::runComparative(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator().runComparative(options, results_dir.path());
     const std::string log = capture.str();
 
     EXPECT_EQ(ran, 3u);
@@ -400,7 +452,7 @@ std::string runScenarioCapturingErrorLog(const std::string& tag, std::size_t& ra
     {
         std::ofstream error_log(error_log_path);
         const simulator::CerrSinkGuard sink(error_log.rdbuf());
-        ran_out = simulator::runComparative(options, results_dir.path());
+        ran_out = simulator::Simulator().runComparative(options, results_dir.path());
     } // sink destroyed (restores std::cerr), then error_log destroyed (flushes to disk).
 
     std::ifstream in(error_log_path);
@@ -482,7 +534,7 @@ TEST(MultithreadingVerify, ReturnValueCorrectWithMixOfSuccessesAndFailuresUnderC
                           "algorithm=" + algorithm_copy.string(), "num_threads=4"});
 
     CerrCapture capture;
-    const std::size_t ran = simulator::runComparative(options, results_dir.path());
+    const std::size_t ran = simulator::Simulator().runComparative(options, results_dir.path());
 
     EXPECT_EQ(ran, 3u);
 

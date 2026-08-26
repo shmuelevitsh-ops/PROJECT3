@@ -46,12 +46,13 @@ add_executable(simulator_322889890_315113738
     src/MockGPS.cpp
     src/MockLidar.cpp
     src/MockMovement.cpp
+    src/ParallelExecutor.cpp
     src/Registrar.cpp
     src/SimulationManager.cpp
     src/SimulationOutputWriter.cpp
     src/SimulationRunFactoryImpl.cpp
     src/SimulationRunImpl.cpp
-    src/SimulatorRunner.cpp
+    src/Simulator.cpp
     src/drone_mapper_simulation_main.cpp
 )
 
@@ -118,12 +119,13 @@ add_executable(simulator_registration_test
     src/MockGPS.cpp
     src/MockLidar.cpp
     src/MockMovement.cpp
+    src/ParallelExecutor.cpp
     src/Registrar.cpp
     src/SimulationManager.cpp
     src/SimulationOutputWriter.cpp
     src/SimulationRunFactoryImpl.cpp
     src/SimulationRunImpl.cpp
-    src/SimulatorRunner.cpp
+    src/Simulator.cpp
 )
 
 target_include_directories(simulator_registration_test PRIVATE

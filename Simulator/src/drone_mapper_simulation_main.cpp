@@ -1,6 +1,6 @@
 #include <Simulator/CerrContextGuard.h>
 #include <Simulator/CliOptions.h>
-#include <Simulator/SimulatorRunner.h>
+#include <Simulator/Simulator.h>
 
 #include <chrono>
 #include <ctime>
@@ -102,13 +102,14 @@ int runSimulator(
     // 3. Run the simulator according to the selected mode.
     try {
         std::size_t component_count = 0;
+        const simulator::Simulator sim;
 
         if (std::holds_alternative<simulator::ComparativeOptions>(options)) {
             const auto& comparative = std::get<simulator::ComparativeOptions>(options);
-            component_count = simulator::runComparative(comparative, results_dir);
+            component_count = sim.runComparative(comparative, results_dir);
         } else {
             const auto& competition = std::get<simulator::CompetitionOptions>(options);
-            component_count = simulator::runCompetition(competition, results_dir);
+            component_count = sim.runCompetition(competition, results_dir);
         }
 
         std::cout << "simulator_322889890_315113738: ran " << component_count << " component(s).\n";
