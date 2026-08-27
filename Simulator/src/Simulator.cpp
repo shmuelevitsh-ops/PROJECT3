@@ -152,8 +152,7 @@ std::size_t Simulator::runComparative() const {
     const std::vector<std::filesystem::path> mission_control_libraries =
         sortedByFilename(options.mission_control_libraries);
 
-    // Preallocate one result slot per MissionControl so the preload loop below, and later the
-    // workers, can write by original component index.
+    // One outcome slot per component, indexed by deterministic component order.
     std::vector<ComponentOutcome> outcomes(mission_control_libraries.size());
 
     // Load every MissionControl sequentially, on the calling thread, before any worker thread starts.
@@ -165,15 +164,11 @@ std::size_t Simulator::runComparative() const {
                                                                             return Registrar::instance().loadMissionControl(path);
                                                                         });
 
-    // Process every already-loaded MissionControl, sequentially or with workers according to
-    // num_threads. Only successfully loaded components are handed to the executor, so it never
-    // sizes its worker pool for components that failed to load and have nothing left to run.
+    // Run only successfully loaded components through the executor.
     const ParallelExecutor executor(options.num_threads);
     
     executor.run(loaded.indices.size(), [&](std::size_t task_index) {
-        // task
-        // task_index is a position in the successfully loaded components;
-        // index is the component's original deterministic position.
+        // Map loaded-task index back to the component's original index.
         const std::size_t index = loaded.indices[task_index];
         const std::filesystem::path& library_path = mission_control_libraries[index];
         const std::string& component_name = outcomes[index].component_name;
@@ -215,8 +210,7 @@ std::size_t Simulator::runCompetition() const {
         Registrar::instance().loadMissionControl(options.mission_control_so_file);
     // The Algorithms are the components being compared in competition mode.
     const std::vector<std::filesystem::path> algorithm_libraries = sortedByFilename(options.algorithm_libraries);
-    // Preallocate one result slot per Algorithm so the preload loop below, and later the workers,
-    // can write by original component index.
+    // One outcome slot per component, indexed by deterministic component order.
     std::vector<ComponentOutcome> outcomes(algorithm_libraries.size());
 
     // Load every Algorithm sequentially, on the calling thread, before any worker thread starts.
@@ -228,15 +222,11 @@ std::size_t Simulator::runCompetition() const {
                                                                             return Registrar::instance().loadMappingAlgorithm(path);
                                                                         });
 
-    // Process every already-loaded Algorithm, sequentially or with workers according to
-    // num_threads. Only successfully loaded components are handed to the executor, so it never
-    // sizes its worker pool for components that failed to load and have nothing left to run.
+    // Run only successfully loaded components through the executor.
     const ParallelExecutor executor(options.num_threads);
     
     executor.run(loaded.indices.size(), [&](std::size_t task_index) {
-        // task
-        // task_index is a position in the successfully loaded components;
-        // index is the component's original deterministic position.
+        // Map loaded-task index back to the component's original index.
         const std::size_t index = loaded.indices[task_index];
         const std::filesystem::path& library_path = algorithm_libraries[index];
         const std::string& component_name = outcomes[index].component_name;

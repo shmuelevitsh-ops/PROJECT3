@@ -15,6 +15,8 @@
 
 namespace {
 
+constexpr std::string_view kProgramName = "simulator_322889890_315113738";
+
 // Creates a UTC timestamp for result directory names.
 // Name collisions are handled separately when the directory is created.
 std::string resultsTimestamp() {
@@ -54,7 +56,7 @@ std::optional<std::filesystem::path> createUniqueResultsDir(
         const bool created = std::filesystem::create_directories(results_dir, ec);
 
         if (ec) {
-            std::cerr << "simulator_322889890_315113738: failed to create results directory '"
+            std::cerr << kProgramName << ": failed to create results directory '"
                       << results_dir.string() << "': " << ec.message() << '\n';
             return std::nullopt;
         }
@@ -87,7 +89,7 @@ int runSimulator(
     const std::filesystem::path error_log_path = results_dir / "error.log";
     std::ofstream error_log(error_log_path);
     if (!error_log) {
-        std::cerr << "simulator_322889890_315113738: failed to open error log file '"
+        std::cerr << kProgramName << ": failed to open error log file '"
                   << error_log_path.string() << "'\n";
 
         std::error_code cleanup_ec;
@@ -104,10 +106,10 @@ int runSimulator(
         const simulator::Simulator sim(options, results_dir);
         const std::size_t component_count = sim.run();
 
-        std::cout << "simulator_322889890_315113738: ran " << component_count << " component(s).\n";
+        std::cout << kProgramName << ": ran " << component_count << " component(s).\n";
         return 0;
     } catch (const std::exception& e) {
-        std::cerr << "simulator_322889890_315113738: unrecoverable error: "
+        std::cerr << kProgramName << ": unrecoverable error: "
                   << e.what() << '\n';
         return 1;
     }

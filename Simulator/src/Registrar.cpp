@@ -11,7 +11,6 @@ namespace simulator {
 
 Registrar& Registrar::instance() {
     // Function-local static: constructed once on the first call to instance().
-    // Its initialization is thread-safe (since C++11), so all callers get the same Registrar.
     static Registrar registrar;
     return registrar;
 }

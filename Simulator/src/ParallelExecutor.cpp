@@ -41,10 +41,8 @@ void ParallelExecutor::run(
     std::vector<std::jthread> workers;
     workers.reserve(worker_count);
     for (std::size_t t = 0; t < worker_count; ++t) {
-        // Creates a worker thread and stores it in the vector.
-        // Each worker handles multiple tasks instead of creating a new thread per task.
+        // Each worker repeatedly claims tasks from the shared atomic index.
         workers.emplace_back([&next, item_count, &task, &on_failure]() {
-            // This lambda is the function executed by each worker thread.
             for (;;) {
                 // Atomically take the next (unique) task index.
                 const std::size_t i = next.fetch_add(1);

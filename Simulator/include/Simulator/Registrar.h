@@ -10,6 +10,8 @@ namespace simulator {
 
 // Loads plugin libraries, collects their registered factories,
 // and keeps the libraries alive while those factories exist.
+// Not internally thread-safe; all plugin loading and registration are completed
+// sequentially before worker threads begin.
 class Registrar {
 public:
     static Registrar& instance();
@@ -34,7 +36,6 @@ private:
     // Private RAII helper for Registrar-owned plugin handles.
     // Nested here because only Registrar should manage loaded .so lifetimes.
     // Owns a dlopen handle and closes it on destruction.
-    // Copying is disabled; ownership can be moved.
     class LibraryHandle {
     public:
         explicit LibraryHandle(const std::filesystem::path& library_path);
