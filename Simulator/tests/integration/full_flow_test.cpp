@@ -81,6 +81,7 @@
 #include <Simulator/MockLidar.h>
 #include <Simulator/MockMovement.h>
 #include <Simulator/SimulationRunImpl.h>
+#include <Simulator/SimulationException.h>
 
 #include "mocks/GMockIMappingAlgorithm.h"
 
@@ -712,7 +713,7 @@ TEST(Integration, ScriptedMockAlgorithmRealHappyPathWritesMapAndScoresNonZero) {
 // Advance(10cm) with the drone already facing that wall (heading 180deg, -x) -- exactly the kind
 // of movement a real (buggy) mapping algorithm could return -- and is then scripted to finish the
 // mission on its next call, so the run continues past the logged collision to Completed.
-TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallLogsErrorAndMissionContinuesToCompleted) {
+TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallAbortsTheRunWithMovementCollision) {
     const std::shared_ptr<NpyArray> benchmark_array = loadBenchmarkMap();
     auto hidden_map = std::make_unique<Map3DImpl>(benchmark_array, benchmarkHiddenMapConfig(benchmark_array->Shape()));
 
@@ -736,10 +737,12 @@ TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallLogsErrorAndMissionContin
     faulty_advance.type = MovementCommandType::Advance;
     faulty_advance.distance = 10.0 * isq::length[cm];
     EXPECT_CALL(*algorithm, nextStep(::testing::_, ::testing::IsNull()))
-        .WillOnce(::testing::Return(
-            MappingStepCommand{faulty_advance, std::nullopt, AlgorithmStatus::Working}))
-        .WillOnce(::testing::Return(
-            MappingStepCommand{std::nullopt, std::nullopt, AlgorithmStatus::Finished}));
+    .WillOnce(::testing::Return(
+        MappingStepCommand{
+            faulty_advance,
+            std::nullopt,
+            AlgorithmStatus::Working
+        }));
 
     const std::filesystem::path output_dir = scratchDir() / "faulty_algorithm_wall_collision";
     std::filesystem::create_directories(output_dir);
@@ -756,22 +759,14 @@ TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallLogsErrorAndMissionContin
                          std::move(lidar_impl), std::move(algorithm), std::move(mission_control),
                          simulation_config, mission, output_file);
 
-    simulator::types::SimulationResult result;
-    ASSERT_NO_THROW(result = run.run()) << "a movement collision must surface as a normal error "
-                                            "result, never as an uncaught exception / crash";
-
-    // Recoverable per row 9: the collision is logged but does not abort the run, so the normal
-    // (non -1.0) scoring path runs once the mission finishes.
-    EXPECT_GE(result.mission_score, 0.0);
-
-    ASSERT_EQ(result.mission_results.size(), 1u);
-    EXPECT_EQ(result.mission_results[0].status, MissionRunStatus::Completed);
-    EXPECT_EQ(result.mission_results[0].steps, 2u);
-    ASSERT_EQ(result.mission_results[0].errors.size(), 1u);
-    EXPECT_EQ(result.mission_results[0].errors[0].code, "DRONE_CONTROL_ERROR");
-    EXPECT_NE(result.mission_results[0].errors[0].message.find("MOVEMENT_COLLISION"), std::string::npos)
-        << "collision-specific information must survive into the reported error message, got: "
-        << result.mission_results[0].errors[0].message;
+    try {
+        (void)run.run();
+        FAIL() << "expected wall collision to abort this simulation run";
+    } catch (const simulator::SimulationException& e) {
+        EXPECT_EQ(e.code(), "MOVEMENT_COLLISION");
+        EXPECT_NE(std::string(e.what()).find("MOVEMENT_COLLISION"),
+                std::string::npos);
+    }
 }
 
 // Spawns the real simulator_322889890_315113738 binary against a real composition

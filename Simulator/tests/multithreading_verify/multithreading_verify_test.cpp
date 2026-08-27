@@ -54,6 +54,7 @@
 #include <thread>
 #include <variant>
 #include <vector>
+#include <exception>
 
 namespace {
 
@@ -271,11 +272,16 @@ ExecutionTrace traceExecution(const std::optional<int>& num_threads, std::size_t
     ExecutionTrace trace;
     std::mutex mutex; // the tasks run concurrently, so the trace needs its own synchronization
     const simulator::ParallelExecutor executor(num_threads);
-    executor.run(item_count, [&](std::size_t index) {
+    executor.run(
+    item_count,
+    [&](std::size_t index) {
         const std::lock_guard<std::mutex> lock(mutex);
         ++trace.tasks_run;
         trace.indices.insert(index);
         trace.threads.insert(std::this_thread::get_id());
+    },
+    [](std::size_t, std::exception_ptr) {
+        // These test tasks are not expected to throw.
     });
     return trace;
 }

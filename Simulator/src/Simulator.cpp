@@ -73,6 +73,59 @@ void aggregateOutcomes(std::vector<ComponentOutcome>& outcomes, std::vector<Comp
     }
 }
 
+template <typename Factory>
+struct LoadedComponents {
+    std::vector<std::size_t> indices;
+    std::vector<Factory> factories;
+};
+
+// Loads component factories sequentially before worker threads start,
+// keeping successful factories aligned with their original component indices.
+// Generic template that preloads component factories on the calling thread,
+// supporting both Algorithm and MissionControl factory types.
+template <typename Factory, typename Loader>
+LoadedComponents<Factory> preloadComponents(
+    const std::vector<std::filesystem::path>& libraries,
+    std::vector<ComponentOutcome>& outcomes,
+    Loader&& loader) {
+
+    LoadedComponents<Factory> loaded;
+    loaded.indices.reserve(libraries.size());
+    loaded.factories.reserve(libraries.size());
+
+    for (std::size_t index = 0; index < libraries.size(); ++index) {
+        const std::filesystem::path& library_path = libraries[index];
+        outcomes[index].component_name = library_path.filename().string();
+        const std::string& component_name = outcomes[index].component_name;
+
+        const CerrContextGuard component_guard("component=" + component_name);
+
+        try {
+            loaded.factories.push_back(loader(library_path));
+            loaded.indices.push_back(index);
+        } catch (const std::exception& e) {
+            std::cerr << "failed to load " << component_name
+                      << ": " << e.what() << '\n';
+        }
+    }
+
+    return loaded;
+}
+
+// Reports an unexpected component-level exception without stopping other components.
+void reportUnexpectedComponentFailure(const std::string& component_name, std::exception_ptr exception) {
+    const CerrContextGuard component_guard("component=" + component_name);
+    try {
+            std::rethrow_exception(exception);
+        } catch (const std::exception& e) {
+            std::cerr << "component " << component_name
+                    << " failed unexpectedly: " << e.what() << '\n';
+        } catch (...) {
+            std::cerr << "component " << component_name
+                    << " failed with an unknown exception\n";
+        }
+}   
+
 } // namespace
 
 Simulator::Simulator(std::variant<ComparativeOptions, CompetitionOptions> options, std::filesystem::path results_dir)
@@ -103,37 +156,25 @@ std::size_t Simulator::runComparative() const {
     // workers, can write by original component index.
     std::vector<ComponentOutcome> outcomes(mission_control_libraries.size());
 
-    // Load every MissionControl sequentially, on the calling thread, before any worker thread
-    // starts. A load failure affects only that one component: its outcome stays a failure (empty
-    // totals) and it is simply left out of loaded_indices/loaded_mission_controls below, so no
-    // worker thread is ever created to do nothing for it.
-    std::vector<std::size_t> loaded_indices; // original component index of each successful load, ascending
-    std::vector<common::MissionControlFactory> loaded_mission_controls; // aligned with loaded_indices
-    for (std::size_t index = 0; index < mission_control_libraries.size(); ++index) {
-        const std::filesystem::path& library_path = mission_control_libraries[index];
-        outcomes[index].component_name = library_path.filename().string();
-        const std::string& component_name = outcomes[index].component_name;
-
-        const CerrContextGuard component_guard("component=" + component_name);
-        try {
-            loaded_mission_controls.push_back(Registrar::instance().loadMissionControl(library_path));
-            loaded_indices.push_back(index);
-        } catch (const std::exception& e) {
-            // A load failure affects only this component, so the remaining components can continue.
-            std::cerr << "failed to load " << component_name << ": " << e.what() << '\n';
-        }
-    }
+    // Load every MissionControl sequentially, on the calling thread, before any worker thread starts.
+    // A load failure affects only that one component: its outcome stays a failure (empty totals)
+    // and it is left out of the successfully loaded components below.
+    const auto loaded = preloadComponents<common::MissionControlFactory>(mission_control_libraries,
+                                                                        outcomes,
+                                                                        [](const std::filesystem::path& path) {
+                                                                            return Registrar::instance().loadMissionControl(path);
+                                                                        });
 
     // Process every already-loaded MissionControl, sequentially or with workers according to
     // num_threads. Only successfully loaded components are handed to the executor, so it never
     // sizes its worker pool for components that failed to load and have nothing left to run.
     const ParallelExecutor executor(options.num_threads);
     
-    executor.run(loaded_indices.size(), [&](std::size_t task_index) {
+    executor.run(loaded.indices.size(), [&](std::size_t task_index) {
         // task
-        // task_index is a position into loaded_indices/loaded_mission_controls; index is that
-        // component's original, deterministic position in mission_control_libraries/outcomes.
-        const std::size_t index = loaded_indices[task_index];
+        // task_index is a position in the successfully loaded components;
+        // index is the component's original deterministic position.
+        const std::size_t index = loaded.indices[task_index];
         const std::filesystem::path& library_path = mission_control_libraries[index];
         const std::string& component_name = outcomes[index].component_name;
         const std::string component_stem = library_path.stem().string();
@@ -143,24 +184,12 @@ std::size_t Simulator::runComparative() const {
 
         // Run the whole composition using the fixed Algorithm and this MissionControl.
         runOneComponent(component_name, component_stem, parsed, results_dir_, mapping_algorithm_factory,
-                        loaded_mission_controls[task_index], options.verbose, outcomes[index]);
+                        loaded.factories[task_index], options.verbose, outcomes[index]);
     },
     [&](std::size_t task_index, std::exception_ptr exception) {
         // on_failure
-        const std::size_t index = loaded_indices[task_index];
-        const std::string& component_name = outcomes[index].component_name;
-
-        const CerrContextGuard component_guard("component=" + component_name);
-
-        try {
-            std::rethrow_exception(exception);
-        } catch (const std::exception& e) {
-            std::cerr << "component " << component_name
-                    << " failed unexpectedly: " << e.what() << '\n';
-        } catch (...) {
-            std::cerr << "component " << component_name
-                    << " failed with an unknown exception\n";
-        }
+        const std::size_t index = loaded.indices[task_index];
+        reportUnexpectedComponentFailure(outcomes[index].component_name, exception);
     });
 
     // Split completed components into successful totals and failures.
@@ -192,35 +221,23 @@ std::size_t Simulator::runCompetition() const {
 
     // Load every Algorithm sequentially, on the calling thread, before any worker thread starts.
     // A load failure affects only that one component: its outcome stays a failure (empty totals)
-    // and it is simply left out of loaded_indices/loaded_mapping_algorithms below, so no worker
-    // thread is ever created to do nothing for it.
-    std::vector<std::size_t> loaded_indices; // original component index of each successful load, ascending
-    std::vector<common::MappingAlgorithmFactory> loaded_mapping_algorithms; // aligned with loaded_indices
-    for (std::size_t index = 0; index < algorithm_libraries.size(); ++index) {
-        const std::filesystem::path& library_path = algorithm_libraries[index];
-        outcomes[index].component_name = library_path.filename().string();
-        const std::string& component_name = outcomes[index].component_name;
-
-        const CerrContextGuard component_guard("component=" + component_name);
-        try {
-            loaded_mapping_algorithms.push_back(Registrar::instance().loadMappingAlgorithm(library_path));
-            loaded_indices.push_back(index);
-        } catch (const std::exception& e) {
-            // A load failure affects only this component, so the remaining components can continue.
-            std::cerr << "failed to load " << component_name << ": " << e.what() << '\n';
-        }
-    }
+    // and it is left out of the successfully loaded components below.
+    const auto loaded = preloadComponents<common::MappingAlgorithmFactory>(algorithm_libraries,
+                                                                        outcomes,
+                                                                        [](const std::filesystem::path& path) {
+                                                                            return Registrar::instance().loadMappingAlgorithm(path);
+                                                                        });
 
     // Process every already-loaded Algorithm, sequentially or with workers according to
     // num_threads. Only successfully loaded components are handed to the executor, so it never
     // sizes its worker pool for components that failed to load and have nothing left to run.
     const ParallelExecutor executor(options.num_threads);
     
-    executor.run(loaded_indices.size(), [&](std::size_t task_index) {
+    executor.run(loaded.indices.size(), [&](std::size_t task_index) {
         // task
-        // task_index is a position into loaded_indices/loaded_mapping_algorithms; index is that
-        // component's original, deterministic position in algorithm_libraries/outcomes.
-        const std::size_t index = loaded_indices[task_index];
+        // task_index is a position in the successfully loaded components;
+        // index is the component's original deterministic position.
+        const std::size_t index = loaded.indices[task_index];
         const std::filesystem::path& library_path = algorithm_libraries[index];
         const std::string& component_name = outcomes[index].component_name;
         const std::string component_stem = library_path.stem().string();
@@ -228,25 +245,13 @@ std::size_t Simulator::runCompetition() const {
         const CerrContextGuard component_guard("component=" + component_name);
 
         // Run the whole composition using this Algorithm and the fixed MissionControl.
-        runOneComponent(component_name, component_stem, parsed, results_dir_, loaded_mapping_algorithms[task_index],
+        runOneComponent(component_name, component_stem, parsed, results_dir_, loaded.factories[task_index],
                         mission_control_factory, options.verbose, outcomes[index]);
     },
     [&](std::size_t task_index, std::exception_ptr exception) {
         // on_failure
-        const std::size_t index = loaded_indices[task_index];
-        const std::string& component_name = outcomes[index].component_name;
-
-        const CerrContextGuard component_guard("component=" + component_name);
-
-        try {
-            std::rethrow_exception(exception);
-        } catch (const std::exception& e) {
-            std::cerr << "component " << component_name
-                    << " failed unexpectedly: " << e.what() << '\n';
-        } catch (...) {
-            std::cerr << "component " << component_name
-                    << " failed with an unknown exception\n";
-        }
+        const std::size_t index = loaded.indices[task_index];
+        reportUnexpectedComponentFailure(outcomes[index].component_name, exception);
     });
 
     // Split completed components into successful totals and failures.

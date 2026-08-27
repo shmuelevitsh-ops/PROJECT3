@@ -549,6 +549,103 @@ TEST(SimulationManager, ExceptionFromFactoryCreateIsCaughtScoredNegativeOneAndDo
     EXPECT_EQ(report.runs[1].mission_score, 0.0) << "the second run should have completed normally";
 }
 
+TEST(SimulationManager, SimulationExceptionFromRunRunScoresNegativeOneAndDoesNotAbortRemainingRuns) {
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {
+        {SimulationConfigData{}, {MissionConfigData{}}}
+    };
+    composition.drone_configs = {
+        DroneConfigData{},
+        DroneConfigData{}
+    };
+    composition.lidar_configs = {
+        LidarConfigData{}
+    };
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {
+        {ReferencedConfigFile{"sim.yaml"},
+         {ReferencedConfigFile{"mission.yaml"}}}
+    };
+    file_paths.drone_paths = {
+        "drone_0.yaml",
+        "drone_1.yaml"
+    };
+    file_paths.lidar_paths = {
+        "lidar.yaml"
+    };
+
+    auto factory =
+        std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+
+    {
+        ::testing::InSequence seq;
+
+        EXPECT_CALL(*factory, create(_, _, _, _, _))
+            .WillOnce(Invoke(
+                [](const SimulationConfigData&,
+                   const MissionConfigData&,
+                   const DroneConfigData&,
+                   const LidarConfigData&,
+                   const std::filesystem::path&) {
+
+                    auto run =
+                        std::make_unique<NiceMock<test::GMockISimulationRun>>();
+
+                    EXPECT_CALL(*run, run())
+                        .WillOnce(Throw(SimulationException(
+                            "MOVEMENT_COLLISION",
+                            "drone collided with wall")));
+
+                    return std::unique_ptr<ISimulationRun>(std::move(run));
+                }));
+
+        EXPECT_CALL(*factory, create(_, _, _, _, _))
+            .WillOnce(Invoke(
+                [](const SimulationConfigData&,
+                   const MissionConfigData&,
+                   const DroneConfigData&,
+                   const LidarConfigData&,
+                   const std::filesystem::path&) {
+
+                    auto run =
+                        std::make_unique<NiceMock<test::GMockISimulationRun>>();
+
+                    SimulationResult result;
+                    result.mission_score = 42.0;
+
+                    EXPECT_CALL(*run, run())
+                        .WillOnce(Return(result));
+
+                    return std::unique_ptr<ISimulationRun>(std::move(run));
+                }));
+    }
+
+    SimulationManager manager(std::move(factory), file_paths);
+
+    const SimulationManagerReport report =
+        manager.run(
+            composition,
+            "tests/component/test_output/simulation_manager_test/"
+            "movement_collision");
+
+    ASSERT_EQ(report.runs.size(), 2u);
+
+    // The collided run fails with -1 and preserves the specific error.
+    EXPECT_EQ(report.runs[0].mission_score, -1.0);
+    ASSERT_EQ(report.runs[0].mission_results.size(), 1u);
+    ASSERT_EQ(report.runs[0].mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(
+        report.runs[0].mission_results[0].errors[0].code,
+        "MOVEMENT_COLLISION");
+    EXPECT_EQ(
+        report.runs[0].mission_results[0].errors[0].message,
+        "drone collided with wall");
+
+    // The collision must not prevent the next scenario from running.
+    EXPECT_EQ(report.runs[1].mission_score, 42.0);
+}
+
 TEST(SimulationManager, ExceptionFromRunRunUsesGenericErrorCodeForNonSimulationException) {
     SimulationCompositionData composition;
     composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
