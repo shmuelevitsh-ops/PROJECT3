@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <functional>
 #include <optional>
+#include <exception>
 
 namespace simulator {
 
@@ -16,9 +17,12 @@ public:
     explicit ParallelExecutor(std::optional<int> num_threads);
 
     // Runs task(index) once for every index in [0, item_count).
+    // If a task throws, reports the failure through on_failure and continues.
     // Returns only after every task has finished.
-    // An exception escaping task is swallowed, so one failing task cannot stop the others.
-    void run(std::size_t item_count, const std::function<void(std::size_t)>& task) const;
+    void run(
+    std::size_t item_count,
+    const std::function<void(std::size_t)>& task,
+    const std::function<void(std::size_t, std::exception_ptr)>& on_failure) const;
 
 private:
     // Determines how many worker threads to use for work_items tasks.

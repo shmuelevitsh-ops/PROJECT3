@@ -17,14 +17,19 @@ std::size_t ParallelExecutor::computeWorkerCount(std::size_t work_items) const {
     return std::min<std::size_t>(static_cast<std::size_t>(*num_threads_), work_items);
 }
 
-void ParallelExecutor::run(std::size_t item_count, const std::function<void(std::size_t)>& task) const {
+void ParallelExecutor::run(
+    std::size_t item_count,
+    const std::function<void(std::size_t)>& task,
+    const std::function<void(std::size_t, std::exception_ptr)>& on_failure) const {
+
     const std::size_t worker_count = computeWorkerCount(item_count);
+
     if (worker_count == 0) {
         for (std::size_t i = 0; i < item_count; ++i) {
             try {
                 task(i);
             } catch (...) {
-                // Isolate an unexpected failure to this task so later tasks can still run.
+                on_failure(i, std::current_exception());
             }
         }
         return;
@@ -49,14 +54,12 @@ void ParallelExecutor::run(std::size_t item_count, const std::function<void(std:
                 try {
                     task(i);
                 } catch (...) {
-                    // Prevent an unexpected exception from escaping the worker thread
-                    // and terminating the entire process.
+                    on_failure(i, std::current_exception());
                 }
             }
         });
     }
-    // Returning from here destroys the workers vector, and every std::jthread in it joins
-    // its thread, so run() returns only after all tasks have finished.
+    // Destroying the jthreads joins all workers before run() returns.
 }
 
 } // namespace simulator

@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <exception>
 
 namespace simulator {
 
@@ -129,6 +130,7 @@ std::size_t Simulator::runComparative() const {
     const ParallelExecutor executor(options.num_threads);
     
     executor.run(loaded_indices.size(), [&](std::size_t task_index) {
+        // task
         // task_index is a position into loaded_indices/loaded_mission_controls; index is that
         // component's original, deterministic position in mission_control_libraries/outcomes.
         const std::size_t index = loaded_indices[task_index];
@@ -142,6 +144,23 @@ std::size_t Simulator::runComparative() const {
         // Run the whole composition using the fixed Algorithm and this MissionControl.
         runOneComponent(component_name, component_stem, parsed, results_dir_, mapping_algorithm_factory,
                         loaded_mission_controls[task_index], options.verbose, outcomes[index]);
+    },
+    [&](std::size_t task_index, std::exception_ptr exception) {
+        // on_failure
+        const std::size_t index = loaded_indices[task_index];
+        const std::string& component_name = outcomes[index].component_name;
+
+        const CerrContextGuard component_guard("component=" + component_name);
+
+        try {
+            std::rethrow_exception(exception);
+        } catch (const std::exception& e) {
+            std::cerr << "component " << component_name
+                    << " failed unexpectedly: " << e.what() << '\n';
+        } catch (...) {
+            std::cerr << "component " << component_name
+                    << " failed with an unknown exception\n";
+        }
     });
 
     // Split completed components into successful totals and failures.
@@ -198,6 +217,7 @@ std::size_t Simulator::runCompetition() const {
     const ParallelExecutor executor(options.num_threads);
     
     executor.run(loaded_indices.size(), [&](std::size_t task_index) {
+        // task
         // task_index is a position into loaded_indices/loaded_mapping_algorithms; index is that
         // component's original, deterministic position in algorithm_libraries/outcomes.
         const std::size_t index = loaded_indices[task_index];
@@ -210,6 +230,23 @@ std::size_t Simulator::runCompetition() const {
         // Run the whole composition using this Algorithm and the fixed MissionControl.
         runOneComponent(component_name, component_stem, parsed, results_dir_, loaded_mapping_algorithms[task_index],
                         mission_control_factory, options.verbose, outcomes[index]);
+    },
+    [&](std::size_t task_index, std::exception_ptr exception) {
+        // on_failure
+        const std::size_t index = loaded_indices[task_index];
+        const std::string& component_name = outcomes[index].component_name;
+
+        const CerrContextGuard component_guard("component=" + component_name);
+
+        try {
+            std::rethrow_exception(exception);
+        } catch (const std::exception& e) {
+            std::cerr << "component " << component_name
+                    << " failed unexpectedly: " << e.what() << '\n';
+        } catch (...) {
+            std::cerr << "component " << component_name
+                    << " failed with an unknown exception\n";
+        }
     });
 
     // Split completed components into successful totals and failures.
