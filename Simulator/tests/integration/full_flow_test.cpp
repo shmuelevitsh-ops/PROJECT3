@@ -81,7 +81,6 @@
 #include <Simulator/MockLidar.h>
 #include <Simulator/MockMovement.h>
 #include <Simulator/SimulationRunImpl.h>
-#include <Simulator/SimulationException.h>
 
 #include "mocks/GMockIMappingAlgorithm.h"
 
@@ -713,7 +712,7 @@ TEST(Integration, ScriptedMockAlgorithmRealHappyPathWritesMapAndScoresNonZero) {
 // Advance(10cm) with the drone already facing that wall (heading 180deg, -x) -- exactly the kind
 // of movement a real (buggy) mapping algorithm could return -- and is then scripted to finish the
 // mission on its next call, so the run continues past the logged collision to Completed.
-TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallAbortsTheRunWithMovementCollision) {
+TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallEndsMissionWithErrorAndNegativeScore) {
     const std::shared_ptr<NpyArray> benchmark_array = loadBenchmarkMap();
     auto hidden_map = std::make_unique<Map3DImpl>(benchmark_array, benchmarkHiddenMapConfig(benchmark_array->Shape()));
 
@@ -759,14 +758,20 @@ TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallAbortsTheRunWithMovementC
                          std::move(lidar_impl), std::move(algorithm), std::move(mission_control),
                          simulation_config, mission, output_file);
 
-    try {
-        (void)run.run();
-        FAIL() << "expected wall collision to abort this simulation run";
-    } catch (const simulator::SimulationException& e) {
-        EXPECT_EQ(e.code(), "MOVEMENT_COLLISION");
-        EXPECT_NE(std::string(e.what()).find("MOVEMENT_COLLISION"),
-                std::string::npos);
-    }
+    simulator::types::SimulationResult result;
+
+    ASSERT_NO_THROW(result = run.run());
+
+    EXPECT_EQ(result.mission_score, -1.0);
+
+    ASSERT_EQ(result.mission_results.size(), 1u);
+    EXPECT_EQ(result.mission_results[0].status, MissionRunStatus::Error);
+
+    ASSERT_EQ(result.mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(result.mission_results[0].errors[0].code, "DRONE_CONTROL_EXCEPTION");
+    EXPECT_NE(
+        result.mission_results[0].errors[0].message.find("MOVEMENT_COLLISION"),
+        std::string::npos);
 }
 
 // Spawns the real simulator_322889890_315113738 binary against a real composition

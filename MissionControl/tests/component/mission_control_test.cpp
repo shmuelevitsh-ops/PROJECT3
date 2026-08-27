@@ -315,6 +315,30 @@ TEST_F(MissionControl, StepsCountReflectsActualNumberOfStepCallsNotMaxSteps) {
     EXPECT_EQ(result.steps, 3u);
 }
 
+TEST_F(MissionControl, DroneControlExceptionStopsMissionAndPreservesCompletedStepCount) {
+    // Step 1 succeeds normally. On the next step, the Algorithm repeatedly returns
+    // a faulty NOOP, causing DroneControl to exhaust its retries and throw.
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(workingCommand()))
+        .WillOnce(Return(MappingStepCommand{}))
+        .WillOnce(Return(MappingStepCommand{}))
+        .WillOnce(Return(MappingStepCommand{}));
+
+    const std::unique_ptr<MissionControlImpl> mission_control =
+        makeMissionControl(10);
+
+    const MissionRunResult result = mission_control->runMission();
+
+    EXPECT_EQ(result.status, MissionRunStatus::Error);
+    EXPECT_EQ(result.steps, 1u);
+
+    ASSERT_EQ(result.errors.size(), 1u);
+    EXPECT_EQ(result.errors[0].code, "DRONE_CONTROL_EXCEPTION");
+    EXPECT_NE(
+        result.errors[0].message.find("invalid or no-op command"),
+        std::string::npos);
+}
+
 TEST_F(MissionControl, UnmappableVoxelsCompletedStatusStillReportsCompletedButAddsError) {
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(unmappableVoxelsCommand()));
 

@@ -36,7 +36,21 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
     std::size_t steps = 0;
 
     while (steps < mission_.max_steps) {
-        const common_types::DroneStepResult result = drone_control_->step();
+        common_types::DroneStepResult result;
+
+        try {
+            result = drone_control_->step();
+        } catch (const std::exception& e) {
+            std::cerr << "MissionControlImpl::runMission: drone control exception: "
+                    << e.what() << '\n';
+
+            errors.push_back(
+                common_types::ErrorRef{"DRONE_CONTROL_EXCEPTION", e.what()});
+
+            status = common_types::MissionRunStatus::Error;
+            break;
+        }
+
         ++steps;
 
         if (result.status == common_types::DroneStepStatus::Continue) {
