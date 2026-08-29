@@ -15,6 +15,9 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace common;
@@ -29,6 +32,13 @@ std::filesystem::path scratchDir() {
         std::filesystem::path("tests/component/test_output/simulation_output_writer_test");
     std::filesystem::create_directories(dir);
     return dir;
+}
+
+std::string readFile(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
 }
 
 SimulationResult scoredRun(double score) {
@@ -81,4 +91,87 @@ TEST(SimulationOutputWriter, MinScoreReflectsTrueScoredMinimumEvenWithErrorRunsP
     EXPECT_DOUBLE_EQ(summary["min_score"].as<double>(), 10.0)
         << "min_score must reflect the true minimum of the scored (non-error) runs, not be "
            "forced to -1 just because the batch also contains an error run";
+}
+
+// Locks in the output-format contract shown by the repo-root reference files
+// (expected_simulation_result.yaml et al.): path/status/code strings are
+// double-quoted, resolution_request_status is a bare unquoted token, and
+// error_score is nested inside score_range rather than a sibling of it.
+TEST(SimulationOutputWriter, StringFieldsAreDoubleQuotedAndErrorScoreNestsUnderScoreRange) {
+    SimulationManagerReport report;
+    report.composition_file = "composition.yaml";
+    report.runs = {scoredRun(10.0), errorRun()};
+
+    const CompositionFilePaths file_paths = oneMissionTwoDroneFilePaths();
+    const std::filesystem::path output_yaml = scratchDir() / "quoting_output.yaml";
+
+    writeSimulationOutput(report, file_paths, output_yaml);
+
+    const std::string raw = readFile(output_yaml);
+    EXPECT_NE(raw.find(R"(composition_file: "composition.yaml")"), std::string::npos);
+    EXPECT_NE(raw.find(R"(drone_config: "drone_a.yaml")"), std::string::npos);
+    EXPECT_NE(raw.find(R"(status: "completed")"), std::string::npos);
+    EXPECT_NE(raw.find(R"(code: "SOME_ERROR")"), std::string::npos);
+    EXPECT_NE(raw.find("resolution_request_status: IGNORED"), std::string::npos)
+        << "resolution_request_status is an enum-like token and must stay unquoted";
+
+    const YAML::Node score_report = YAML::LoadFile(output_yaml.string())["score_report"];
+    EXPECT_FALSE(score_report["error_score"])
+        << "error_score must not be a sibling of score_range";
+    ASSERT_TRUE(score_report["score_range"]["error_score"])
+        << "error_score must be nested inside score_range";
+    EXPECT_EQ(score_report["score_range"]["error_score"].as<int>(), -1);
+}
+
+// Locks in the blank-line separators shown between run entries in
+// expected_simulation_result.yaml -- including after the last run of a
+// mission, which doubles as the separator before the next mission/simulation.
+TEST(SimulationOutputWriter, BlankLineSeparatesEveryRunEntryIncludingTheLastOne) {
+    SimulationManagerReport report;
+    report.composition_file = "composition.yaml";
+    report.runs = {scoredRun(10.0), errorRun()};
+
+    const CompositionFilePaths file_paths = oneMissionTwoDroneFilePaths();
+    const std::filesystem::path output_yaml = scratchDir() / "blank_line_output.yaml";
+
+    writeSimulationOutput(report, file_paths, output_yaml);
+
+    const std::string raw = readFile(output_yaml);
+    EXPECT_NE(raw.find("score: 10\n\n            - drone_config: \"drone_b.yaml\""), std::string::npos)
+        << "expected a blank line between the first and second run entries; got:\n"
+        << raw;
+    EXPECT_NE(raw.find("code: \"SOME_ERROR\"\n\n"), std::string::npos)
+        << "expected a trailing blank line after the last run entry too; got:\n"
+        << raw;
+}
+
+// Locks in the same_results/errors inline-flow, double-quoted list format
+// shown in expected_comparative_report.yaml.
+TEST(WriteComparativeReport, SameResultsAndErrorsAreInlineDoubleQuotedFlowLists) {
+    const std::vector<ComponentRunTotals> totals = {
+        {"manager1.so", 495.0, 100},
+        {"manager2.so", 495.0, 100},
+    };
+    const std::vector<std::string> failed = {"manager3.so"};
+    const std::filesystem::path output_yaml = scratchDir() / "comparative_output.yaml";
+
+    writeComparativeReport("composition.yaml", "folder", totals, failed, output_yaml);
+
+    const std::string raw = readFile(output_yaml);
+    EXPECT_NE(raw.find(R"(same_results: ["manager1.so", "manager2.so"])"), std::string::npos);
+    EXPECT_NE(raw.find(R"(errors: ["manager3.so"])"), std::string::npos);
+}
+
+// errors: [] (not YAML null/~) when nothing failed to load -- same shape as the
+// populated case, just empty, so downstream YAML consumers don't need a
+// separate null check.
+TEST(WriteCompetitiveReport, AlgorithmFieldIsQuotedAndErrorsIsEmptyFlowListWhenNoFailures) {
+    const std::vector<ComponentRunTotals> totals = {{"algorithm1.so", 495.0, 100}};
+    const std::filesystem::path output_yaml = scratchDir() / "competitive_output.yaml";
+
+    writeCompetitiveReport("composition.yaml", "mission_control.so", totals, {}, output_yaml);
+
+    const std::string raw = readFile(output_yaml);
+    EXPECT_NE(raw.find(R"(algorithm: "algorithm1.so")"), std::string::npos);
+    EXPECT_NE(raw.find("errors: []"), std::string::npos);
 }

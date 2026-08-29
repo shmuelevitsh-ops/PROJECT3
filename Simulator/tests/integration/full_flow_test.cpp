@@ -472,7 +472,7 @@ TEST(Integration, YamlDrivenCompositionProducesExpectedSimulationOutput) {
     EXPECT_EQ(score_report["metric"].as<std::string>(), "output_map_accuracy");
     EXPECT_EQ(score_report["score_range"]["min"].as<double>(), 0.0);
     EXPECT_EQ(score_report["score_range"]["max"].as<double>(), 100.0);
-    EXPECT_EQ(score_report["error_score"].as<int>(), -1);
+    EXPECT_EQ(score_report["score_range"]["error_score"].as<int>(), -1);
 
     const YAML::Node summary = score_report["summary"];
     ASSERT_TRUE(summary);

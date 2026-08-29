@@ -31,7 +31,9 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 
 using namespace common;
 using namespace common::types;
@@ -155,10 +157,11 @@ protected:
     }
 
     std::unique_ptr<MissionControlImpl> makeMissionControl(std::size_t max_steps,
-                                                           const std::filesystem::path& output_map_file = "out.npy") {
+                                                           const std::filesystem::path& output_map_file = "out.npy",
+                                                           bool verbose = false) {
         return std::make_unique<MissionControlImpl>(MissionControlDependencies{
             missionConfig(max_steps), droneConfig(), lidar_, gps_, movement_, output_map_, algorithm_,
-            output_map_file});
+            output_map_file, verbose});
     }
 };
 
@@ -429,6 +432,157 @@ TEST_F(MissionControl, UnmappableVoxelsErrorHasExpectedCodeAndMessage) {
 // called; a save failure must not erase that outcome by propagating out of runMission() -- it is
 // appended as an additional OUTPUT_MAP_SAVE_FAILED error and the already-determined result is
 // still returned normally.
+// ── -verbose output ──────────────────────────────────────────────────────────
+//
+// output_map_.save() is mocked in this fixture (it never actually writes out.npy), so any file
+// found in a run's output directory afterwards can only be a verbose diagnostics file
+// MissionControlImpl itself created -- these tests count directory entries rather than
+// hardcoding the log's name, staying agnostic to that naming detail.
+
+namespace {
+
+// A fresh, empty per-test directory under tests/component/test_output/mission_control_test, so
+// runs from different tests never share or collide over output files.
+[[nodiscard]] std::filesystem::path freshOutputDir(const std::string& test_name) {
+    const std::filesystem::path dir =
+        std::filesystem::path("tests/component/test_output/mission_control_test") / test_name;
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+[[nodiscard]] std::size_t countFilesIn(const std::filesystem::path& dir) {
+    std::size_t count = 0;
+    for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator(dir)) {
+        ++count;
+    }
+    return count;
+}
+
+// Reads every regular file directly under `dir` and concatenates their contents -- used to
+// inspect a verbose log's content without hardcoding its filename.
+[[nodiscard]] std::string readAllFilesIn(const std::filesystem::path& dir) {
+    std::string contents;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        std::ifstream file(entry.path());
+        contents.append(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+    return contents;
+}
+
+} // namespace
+
+TEST_F(MissionControl, WithoutVerboseFlagNoOutputFileIsCreated) {
+    const std::filesystem::path dir = freshOutputDir("without_verbose_flag");
+    EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(finishedCommand()));
+
+    const std::unique_ptr<MissionControlImpl> mission_control =
+        makeMissionControl(10, dir / "out.npy", /*verbose=*/false);
+    (void)mission_control->runMission();
+
+    EXPECT_EQ(countFilesIn(dir), 0u);
+}
+
+TEST_F(MissionControl, WithVerboseFlagAnOutputFileIsCreatedWithMissionDetails) {
+    const std::filesystem::path dir = freshOutputDir("with_verbose_flag");
+    const std::filesystem::path output_map_file = dir / "out.npy";
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(workingCommand()))
+        .WillOnce(Return(finishedCommand()));
+
+    const std::unique_ptr<MissionControlImpl> mission_control =
+        makeMissionControl(10, output_map_file, /*verbose=*/true);
+    (void)mission_control->runMission();
+
+    ASSERT_EQ(countFilesIn(dir), 1u);
+    const std::string contents = readAllFilesIn(dir);
+    EXPECT_NE(contents.find("mission started"), std::string::npos);
+    EXPECT_NE(contents.find("max_steps=10"), std::string::npos);
+    EXPECT_NE(contents.find("mission finished"), std::string::npos);
+    EXPECT_NE(contents.find("steps=2"), std::string::npos);
+    EXPECT_NE(contents.find("Completed"), std::string::npos);
+    // The final summary also carries the run's output map path and the terminal message that
+    // actually ended it (here, DroneControlImpl's plain-Finished message).
+    EXPECT_NE(contents.find("output_map=" + output_map_file.string()), std::string::npos);
+    EXPECT_NE(contents.find("completion_reason=mapping finished"), std::string::npos);
+    // Logging is event-based, not per-step: a short, error-free 2-step run must not produce a
+    // "step N" line -- those only appear for meaningful events (errors/exceptions/checkpoints).
+    EXPECT_EQ(contents.find("step "), std::string::npos);
+}
+
+TEST_F(MissionControl, VerboseFlagLogsMeaningfulErrorsAsTheyOccurNotEveryStep) {
+    const std::filesystem::path dir = freshOutputDir("verbose_errors");
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(workingCommand()))
+        .WillOnce(Return(scanCommand()))
+        .WillOnce(Return(finishedCommand()));
+    EXPECT_CALL(lidar_, scan(_)).WillOnce(Throw(std::runtime_error("blocked by obstacle")));
+
+    const std::unique_ptr<MissionControlImpl> mission_control =
+        makeMissionControl(10, dir / "out.npy", /*verbose=*/true);
+    (void)mission_control->runMission();
+
+    const std::string contents = readAllFilesIn(dir);
+    EXPECT_NE(contents.find("blocked by obstacle"), std::string::npos);
+    // Only the errored step (step 2) is logged -- the plain working step (step 1) is not.
+    EXPECT_NE(contents.find("step 2"), std::string::npos);
+    EXPECT_EQ(contents.find("step 1"), std::string::npos);
+}
+
+TEST_F(MissionControl, VerboseFlagLogsACheckpointEvery500StepsInsteadOfEveryStep) {
+    const std::filesystem::path dir = freshOutputDir("verbose_checkpoint");
+    constexpr std::size_t kWorkingSteps = 500;
+    std::size_t call_count = 0;
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .Times(kWorkingSteps + 1)
+        .WillRepeatedly(Invoke([&call_count](const DroneState&, const LidarScanResult*) {
+            ++call_count;
+            return call_count <= kWorkingSteps ? workingCommand() : finishedCommand();
+        }));
+
+    const std::unique_ptr<MissionControlImpl> mission_control =
+        makeMissionControl(kWorkingSteps + 10, dir / "out.npy", /*verbose=*/true);
+    const MissionRunResult result = mission_control->runMission();
+
+    EXPECT_EQ(result.steps, kWorkingSteps + 1);
+    const std::string contents = readAllFilesIn(dir);
+    EXPECT_NE(contents.find("checkpoint: steps=500"), std::string::npos);
+    // Exactly one checkpoint should appear across a 501-step run (only step 500 is a multiple of
+    // the checkpoint interval) -- not one line per step.
+    EXPECT_EQ(contents.find("checkpoint: steps=500"), contents.rfind("checkpoint: steps="));
+}
+
+TEST_F(MissionControl, VerboseFlagDoesNotChangeTheMissionResult) {
+    const std::filesystem::path dir = freshOutputDir("verbose_result_parity");
+    EXPECT_CALL(algorithm_, nextStep(_, _))
+        .WillOnce(Return(scanCommand()))
+        .WillOnce(Return(finishedCommand()))
+        .WillOnce(Return(scanCommand()))
+        .WillOnce(Return(finishedCommand()));
+    EXPECT_CALL(lidar_, scan(_))
+        .WillOnce(Throw(std::runtime_error("blocked by obstacle")))
+        .WillOnce(Throw(std::runtime_error("blocked by obstacle")));
+
+    const std::unique_ptr<MissionControlImpl> quiet_mission_control =
+        makeMissionControl(10, dir / "quiet.npy", /*verbose=*/false);
+    const MissionRunResult quiet_result = quiet_mission_control->runMission();
+
+    const std::unique_ptr<MissionControlImpl> verbose_mission_control =
+        makeMissionControl(10, dir / "verbose.npy", /*verbose=*/true);
+    const MissionRunResult verbose_result = verbose_mission_control->runMission();
+
+    EXPECT_EQ(quiet_result.status, verbose_result.status);
+    EXPECT_EQ(quiet_result.steps, verbose_result.steps);
+    ASSERT_EQ(quiet_result.errors.size(), verbose_result.errors.size());
+    for (std::size_t i = 0; i < quiet_result.errors.size(); ++i) {
+        EXPECT_EQ(quiet_result.errors[i].code, verbose_result.errors[i].code);
+        EXPECT_EQ(quiet_result.errors[i].message, verbose_result.errors[i].message);
+    }
+}
+
 TEST_F(MissionControl, OutputMapSaveFailureIsAppendedAsErrorWithoutErasingMissionResult) {
     EXPECT_CALL(algorithm_, nextStep(_, _)).WillOnce(Return(finishedCommand()));
     EXPECT_CALL(output_map_, save(_)).WillOnce([]() { throw std::runtime_error("disk full"); });
