@@ -8,8 +8,7 @@ namespace algorithm_322889890_315113738 {
 
 class MappingAlgorithmImpl final : public common::IMappingAlgorithm {
 public:
-    // MappingAlgorithmDependencies contains the mission, lidar and drone
-    // configurations, together with the output map.
+    // Receives the algorithm's configuration and output map dependencies.
     explicit MappingAlgorithmImpl(common::MappingAlgorithmDependencies dependencies);
 
     ~MappingAlgorithmImpl() override;

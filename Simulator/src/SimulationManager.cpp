@@ -138,9 +138,18 @@ types::SimulationManagerReport SimulationManager::run(const types::SimulationCom
 
                     const std::filesystem::path leaf_dir =
                         uniqueLeafDir(output_path, sim_stem, mission_stem, drone_stem, lidar_stem, used_leaf_dirs);
-                    std::filesystem::create_directories(leaf_dir);
                     // Attach this run's identity to any cerr output produced in this scope.
                     const CerrContextGuard cerr_guard(contextLabel(sim_stem, mission_stem, drone_stem, lidar_stem));
+                    // A failure to create this run's output directory is a per-run failure, not a
+                    // reason to abort the rest of the composition.
+                    try {
+                        std::filesystem::create_directories(leaf_dir);
+                    } catch (const std::exception& e) {
+                        std::cerr << "SimulationManager::run: failed to create output directory, scoring -1: "
+                            << e.what() << '\n';
+                        runs.push_back(buildErrorResult(simulation, mission, e));
+                        continue;
+                    }
                     // Skip factory creation when ConfigLoader already marked this config as invalid.
                     if (sim_ref.load_error) {
                         std::cerr << "SimulationManager::run: simulation_config failed to load, scoring -1: "

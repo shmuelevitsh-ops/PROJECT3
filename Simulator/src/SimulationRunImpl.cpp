@@ -16,8 +16,10 @@ using common::PhysicalLength;
 
 namespace {
 
-// Derives the resolution_request_status by comparing the requested output
-// resolution with the resolution actually used for the output map.
+// Score assigned to a run that could not complete/be scored normally.
+constexpr double kErrorScore = -1.0;
+
+// Compares requested and actual output-map resolutions.
 types::ResolutionRequestStatus resolutionRequestStatus(
     const types::SimulationConfigData& simulation_config,
     const common_types::MissionConfigData& mission_config) {
@@ -34,6 +36,42 @@ types::ResolutionRequestStatus resolutionRequestStatus(
     }
 
     return types::ResolutionRequestStatus::Ignored;
+}
+
+// True if every axis of `bounds` is non-degenerate (min < max).
+[[nodiscard]] bool hasValidBounds(const common_types::MappingBounds& bounds) {
+    return bounds.min_x < bounds.max_x && bounds.min_y < bounds.max_y &&
+           bounds.min_height < bounds.max_height;
+}
+
+// Builds the result for non-overlapping mission and map bounds.
+types::SimulationResult buildBoundaryErrorResult(
+    const types::SimulationConfigData& simulation_config,
+    const common_types::MissionConfigData& mission_config,
+    const common_types::MapConfig& output_map_config,
+    const std::filesystem::path& output_map_file) {
+
+    std::cerr << "SimulationRunImpl::run: mission boundaries have no overlap with the hidden map"
+                 " — check map offset vs mission boundaries\n";
+
+    types::SimulationResult result;
+    result.simulation_config = simulation_config;
+    result.mission_config = mission_config;
+    result.resolution_request_status = resolutionRequestStatus(simulation_config, mission_config);
+    result.output_map_file = output_map_file;
+    result.output_map_config = output_map_config;
+    result.mission_score = kErrorScore;
+
+    common_types::MissionRunResult boundary_error;
+    boundary_error.status = common_types::MissionRunStatus::Error;
+    boundary_error.steps = 0;
+    boundary_error.errors.push_back({
+        "MISSION_BOUNDARY_INVALID",
+        "mission boundaries have no overlap with the hidden map"
+        " — check map offset vs mission boundaries"});
+
+    result.mission_results = {boundary_error};
+    return result;
 }
 
 } // namespace
@@ -69,39 +107,12 @@ types::SimulationResult SimulationRunImpl::run() {
     const common_types::MappingBounds& mb = mission_config_.mission_bounds;
     const common_types::MappingBounds& hb = hidden_map_->getMapConfig().boundaries;
 
-    const bool mission_valid =
-        mb.min_x < mb.max_x && mb.min_y < mb.max_y && mb.min_height < mb.max_height;
-
-    const bool hidden_valid =
-        hb.min_x < hb.max_x && hb.min_y < hb.max_y && hb.min_height < hb.max_height;
-
-    if (mission_valid && hidden_valid &&
+    if (hasValidBounds(mb) && hasValidBounds(hb) &&
         (mb.min_x >= hb.max_x || mb.max_x <= hb.min_x ||
          mb.min_y >= hb.max_y || mb.max_y <= hb.min_y ||
          mb.min_height >= hb.max_height || mb.max_height <= hb.min_height)) {
-
-        std::cerr << "SimulationRunImpl::run: mission boundaries have no overlap with the hidden map"
-                     " — check map offset vs mission boundaries\n";
-
-        types::SimulationResult result;
-        result.simulation_config = simulation_config_;
-        result.mission_config = mission_config_;
-        result.resolution_request_status =
-            resolutionRequestStatus(simulation_config_, mission_config_);
-        result.output_map_file = output_map_file_;
-        result.output_map_config = output_map_->getMapConfig();
-        result.mission_score = -1.0;
-
-        common_types::MissionRunResult boundary_error;
-        boundary_error.status = common_types::MissionRunStatus::Error;
-        boundary_error.steps = 0;
-        boundary_error.errors.push_back({
-            "MISSION_BOUNDARY_INVALID",
-            "mission boundaries have no overlap with the hidden map"
-            " — check map offset vs mission boundaries"});
-
-        result.mission_results = {boundary_error};
-        return result;
+        return buildBoundaryErrorResult(simulation_config_, mission_config_,
+                                        output_map_->getMapConfig(), output_map_file_);
     }
 
     const common_types::MissionRunResult mission_result = mission_control_->runMission();
@@ -117,14 +128,11 @@ types::SimulationResult SimulationRunImpl::run() {
     result.output_map_file = output_map_file_;
     result.output_map_config = output_map_config;
 
-    // fix from project 2
+    // Error missions are not compared and receive kErrorScore.
     if (mission_result.status == common_types::MissionRunStatus::Error) {
-    result.mission_score = -1.0;
+        result.mission_score = kErrorScore;
     } else {
-        // MapsComparison::compare() can throw via map access (e.g. atVoxel) even though the
-        // mission itself already completed with a valid result -- only scoring/comparison
-        // failed, so the mission result (status/steps/errors) is left untouched here; this is
-        // appended as an extra error rather than the mission being turned into an Error.
+        // Comparison failure adds an error without changing the completed mission result.
         try {
             const std::vector<double> scores =
                 MapsComparison::compare(*hidden_map_, {output_map_.get()});
@@ -132,7 +140,7 @@ types::SimulationResult SimulationRunImpl::run() {
             result.mission_score = scores[0];
         } catch (const std::exception& e) {
             std::cerr << "SimulationRunImpl::run: map comparison failed: " << e.what() << '\n';
-            result.mission_score = -1.0;
+            result.mission_score = kErrorScore;
             result.mission_results[0].errors.push_back(
                 common_types::ErrorRef{"MAP_COMPARISON_FAILED", e.what()});
         }

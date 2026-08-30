@@ -601,7 +601,7 @@ TEST(Integration, ScriptedMockAlgorithmRealHappyPathWritesMapAndScoresNonZero) {
     // (each exactly 10cm from this center). Facing east; altitude irrelevant
     // for movement.
     MockGPS gps(Position3D{75.0 * x_extent[cm], 185.0 * y_extent[cm], 215.0 * z_extent[cm]},
-                Orientation{0.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, mission.gps_resolution);
+                Orientation{0.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]});
     MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
 
@@ -726,7 +726,7 @@ TEST(Integration, FaultyAlgorithmAdvancingIntoARealWallEndsMissionWithErrorAndNe
     // real wall centered at x=65cm, exactly one 10cm resolution step away.
     auto gps = std::make_unique<MockGPS>(
         Position3D{75.0 * x_extent[cm], 185.0 * y_extent[cm], 215.0 * z_extent[cm]},
-        Orientation{180.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, mission.gps_resolution);
+        Orientation{180.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]});
     auto movement = std::make_unique<MockMovement>(*gps, *hidden_map, drone.radius);
     auto lidar_impl = std::make_unique<MockLidar>(lidar, *hidden_map, *gps);
 

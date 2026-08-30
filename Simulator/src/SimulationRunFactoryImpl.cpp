@@ -13,11 +13,6 @@
 
 namespace simulator {
 
-// In our implementation, the output map is built with the same resolution
-// as the hidden map: simulation.map_resolution.
-// The mission's requested resolution (gps_resolution * factor) is checked
-// separately by SimulationRunImpl::resolutionRequestStatus(), which decides
-// whether that request is ACCEPTED or IGNORED.
 common::PhysicalLength outputMapResolution(const types::SimulationConfigData& simulation) {
     return simulation.map_resolution;
 }
@@ -26,9 +21,7 @@ namespace {
 
 constexpr const char* kOutputMapFileName = "map_output.npy";
 
-// Builds hidden_map's MapConfig
-// Combines the NPY shape with the simulation's resolution and offset
-// to build the hidden map's physical bounds.
+// Builds the hidden-map bounds from its shape, resolution and offset.
 common::types::MapConfig hiddenMapConfig(const types::SimulationConfigData& simulation, const NpyArray::shape_t& shape) {
     const double resolution_cm = simulation.map_resolution.force_numerical_value_in(common::cm);
     const double extent_x_voxels = static_cast<double>(shape.size() > 0 ? shape[0] : 1);
@@ -44,8 +37,7 @@ common::types::MapConfig hiddenMapConfig(const types::SimulationConfigData& simu
         simulation.map_resolution};
 }
 
-// Loads the hidden map from simulation.map_filename.
-// If loading fails, throws so SimulationManager can report the run as -1/Error.
+// Loads and validates the hidden map.
 std::unique_ptr<Map3DImpl> loadHiddenMap(const types::SimulationConfigData& simulation) {
     auto array = std::make_shared<NpyArray>();
     const LPCSTR load_error = array->LoadNPY(simulation.map_filename.string());
@@ -58,9 +50,7 @@ std::unique_ptr<Map3DImpl> loadHiddenMap(const types::SimulationConfigData& simu
     return std::make_unique<Map3DImpl>(array, hiddenMapConfig(simulation, array->Shape()));
 }
 
-// Builds the output map from the mission bounds.
-// map_local = mission_relative + offset, so voxel index 0 sits at mission_relative = -offset;
-// its offset is therefore the negated minimum mission corner, putting that corner at index 0.
+// Loads and validates the hidden map.
 common::types::MapConfig outputMapConfig(const types::SimulationConfigData& simulation,
                                          const common::types::MissionConfigData& mission) {
     return common::types::MapConfig{
@@ -94,8 +84,7 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
 
     auto gps = std::make_unique<MockGPS>(
         simulation.initial_drone_position,
-        common::Orientation{simulation.initial_angle, 0.0 * common::altitude_angle[common::deg]},
-        mission.gps_resolution);
+        common::Orientation{simulation.initial_angle, 0.0 * common::altitude_angle[common::deg]});
     auto movement = std::make_unique<MockMovement>(*gps, *hidden_map, drone.radius);
     auto lidar_impl = std::make_unique<MockLidar>(lidar, *hidden_map, *gps);
     

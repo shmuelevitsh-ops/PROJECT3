@@ -197,7 +197,7 @@ std::unique_ptr<Map3DImpl> runTwoRoomMission(long opening_w, long opening_h, dou
 
     // Start in the middle of Room A (x in [1, wall_x - 1]).
     const Position3D start_position = voxelCenter(kRoomNx / 4, kRoomNy / 2, kRoomNz / 2);
-    MockGPS gps(start_position, Orientation{}, mission.gps_resolution);
+    MockGPS gps(start_position, Orientation{});
     MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
@@ -417,7 +417,7 @@ TEST(Internal, MockAlgorithmAlwaysHoveringHitsMaxSteps) {
     MissionConfigData mission = roomMissionConfig();
     mission.max_steps = 50;
 
-    MockGPS gps(voxelCenter(2, 2, 2), Orientation{}, mission.gps_resolution);
+    MockGPS gps(voxelCenter(2, 2, 2), Orientation{});
     MockMovement movement(gps, *hidden_map, drone.radius);
     MockLidar lidar_sensor(lidar, *hidden_map, gps);
 
@@ -491,7 +491,7 @@ TEST(Internal, RealMockMovementAdvanceAtOrthogonalHeadingAgreesWithDroneControlE
     const Position3D start_position{
         1.0e5 * x_extent[cm], 1.0e5 * y_extent[cm], 1.0e5 * z_extent[cm]};
     const Orientation orthogonal_heading{90.0 * horizontal_angle[deg], AltitudeAngle{}};
-    MockGPS gps(start_position, orthogonal_heading, mission.gps_resolution);
+    MockGPS gps(start_position, orthogonal_heading);
     MockMovement movement(gps, *hidden_map, drone.radius);
 
     ::testing::NiceMock<test::GMockILidar> lidar_mock;
@@ -508,7 +508,7 @@ TEST(Internal, RealMockMovementAdvanceAtOrthogonalHeadingAgreesWithDroneControlE
     EXPECT_CALL(algorithm, nextStep(::testing::_, ::testing::_))
         .WillOnce(::testing::Return(advance_command));
 
-    DroneControlImpl control(drone, mission, lidar_mock, gps, movement, *output_map, algorithm);
+    DroneControlImpl control(drone, lidar_mock, gps, movement, *output_map, algorithm);
 
     const DroneStepResult result = control.step();
 

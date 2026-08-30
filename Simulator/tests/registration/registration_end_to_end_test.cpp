@@ -141,7 +141,7 @@ TEST(RegistrationEndToEnd, RejectsMismatchedTypeThenLoadsAndCreatesBoth) {
                                     2.0;
         const Position3D center{center_x_cm * x_extent[cm], center_y_cm * y_extent[cm], center_z_cm * z_extent[cm]};
 
-        simulator::MockGPS gps(center, Orientation{}, mission.gps_resolution);
+        simulator::MockGPS gps(center, Orientation{});
         simulator::MockMovement movement(gps, *hidden_map, drone.radius);
         simulator::MockLidar lidar_sensor(lidar, *hidden_map, gps);
 

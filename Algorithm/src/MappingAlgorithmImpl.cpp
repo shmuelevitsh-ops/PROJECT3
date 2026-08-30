@@ -39,12 +39,12 @@ namespace {
 
 constexpr double kAngleEpsilonDeg = 1e-6;
 constexpr double kDistanceEpsilonCm = 1e-6;
-// A target voxel is given at most this many scan attempts during the Sweep phase
-// before the algorithm pivots away from it and leaves it for the Frontier phase.
+// Maximum Sweep scan attempts for one unresolved target.
 constexpr int kMaxSweepScanAttempts = 1;
+// Sampling step for the line-of-sight pre-filter.
+constexpr double kLineOfSightSampleStepFraction = 0.5;
 
-// Discrete map-grid coordinates used for all bookkeeping, BFS, and safety checks.
-// Kept private to this translation unit (see MappingAlgorithmImpl.h pImpl comment).
+// Discrete map-grid coordinates.
 struct VoxelIndex {
     long ix = 0;
     long iy = 0;
@@ -83,8 +83,7 @@ struct FrontierTargetPairHash {
 
 enum class Phase { Sweep, Frontier, Done };
 
-// Bundles the algorithm's read-only dependencies so free helper functions don't need
-// four separate parameters.
+// Groups the algorithm's read-only dependencies.
 struct Context {
     const common_types::MissionConfigData& mission;
     const common_types::LidarConfigData& lidar;
@@ -99,10 +98,7 @@ struct BfsResult {
     std::vector<VoxelIndex> path{}; // grid steps from the start position to `frontier`, exclusive of start.
 };
 
-// Output of buildMovementQueue(): the chunked commands themselves, plus the horizontal heading
-// (degrees) the drone will be facing once every command in the queue has executed. Callers that
-// need to predict the drone's post-movement state (e.g. to attach a scan to the final command)
-// use final_heading_deg instead of re-deriving it from the command list.
+// Movement commands and the resulting horizontal heading.
 struct MovementPlan {
     std::deque<common_types::MovementCommand> commands{};
     double final_heading_deg = 0.0;
@@ -111,6 +107,11 @@ struct MovementPlan {
 [[nodiscard]] double numCm(PhysicalLength v) { return v.force_numerical_value_in(cm); }
 [[nodiscard]] double numDeg(HorizontalAngle v) { return v.force_numerical_value_in(deg); }
 [[nodiscard]] double numDeg(AltitudeAngle v) { return v.force_numerical_value_in(deg); }
+
+// atan2(y, x), converted to degrees.
+[[nodiscard]] double atan2Deg(double y, double x) {
+    return std::atan2(y, x) * 180.0 / M_PI;
+}
 
 // Wraps an angle in degrees to (-180, 180].
 [[nodiscard]] double normalizeDeg(double angle_deg) {
@@ -139,9 +140,7 @@ struct MovementPlan {
     };
 }
 
-// The voxel's minimum (inclusive) corner -- together with voxelMaxCorner, its full
-// axis-aligned bounding box, used for the sphere-vs-voxel-volume safety check below (as
-// opposed to toWorldCenter(), which collapses the voxel to a single point).
+// Minimum corner of the voxel's axis-aligned bounding box.
 [[nodiscard]] Position3D voxelMinCorner(const VoxelIndex& idx, const common_types::MapConfig& config) {
     const double resolution_cm = numCm(config.resolution);
     return Position3D{
@@ -160,12 +159,7 @@ struct MovementPlan {
     };
 }
 
-// toWorldCenter() implicitly assumes the drone sits exactly at the center of its current voxel,
-// which is only true by coincidence. This returns how far the real drone (at state.position) is
-// actually offset from that assumption, so callers evaluating a planned single-voxel move can
-// add it back onto a target voxel's nominal center and reason about the drone's true future
-// world-space position instead (e.g. a real x=150 advancing by one +10cm grid step becomes
-// x=160, not automatically the target voxel's own center).
+// Preserves the drone's real offset from its voxel center during planning.
 [[nodiscard]] Position3D intraVoxelOffset(const Context& ctx, const common_types::DroneState& state) {
     const common_types::MapConfig config = ctx.map.getMapConfig();
     return state.position - toWorldCenter(toVoxelIndex(state.position, config), config);
@@ -182,14 +176,12 @@ struct MovementPlan {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-// Rejects a target that is provably blocked by an already-discovered wall: a target within
-// lidar range by straight-line distance can still be in a different room, with an Occupied
-// voxel sitting directly between the frontier and it. Scanning toward such a target wastes a
-// step (the beam hits the known wall, not the intended target) and burns the (frontier, target)
-// pair as "tried" for no benefit. Walks the straight line at a fine sub-voxel step (matching
-// ScanResultToVoxels' sampling granularity) so a thin diagonal wall is not skipped over.
-// Unmapped/PotentiallyOccupied cells along the way are not treated as blocking — only a
-// *known* Occupied voxel is a certain obstruction; anything else is still worth attempting.
+// True if `a` and `b` differ by exactly one resolution step along exactly one axis.
+[[nodiscard]] bool isFaceAdjacent(const VoxelIndex& a, const VoxelIndex& b) {
+    return std::abs(a.ix - b.ix) + std::abs(a.iy - b.iy) + std::abs(a.iz - b.iz) == 1;
+}
+
+// Preserves the drone's real offset from its voxel center during planning.
 [[nodiscard]] bool hasLineOfSight(const Context& ctx, const VoxelIndex& from, const VoxelIndex& to) {
     const common_types::MapConfig config = ctx.map.getMapConfig();
     const double resolution_cm = numCm(config.resolution);
@@ -203,11 +195,8 @@ struct MovementPlan {
         return true;
     }
 
-    // Coarser than ScanResultToVoxels' 0.1*resolution sampling: this is a pre-filter deciding
-    // whether a scan is worth attempting, not the physical beam simulation itself (MockLidar
-    // still does the precise hit test later) — half-voxel steps are enough to catch a wall
-    // without paying for 10x as many atVoxel() calls per candidate.
-    const double step_cm = 0.5 * resolution_cm;
+    // A coarse pre-filter; the LiDAR performs the precise hit test.
+    const double step_cm = kLineOfSightSampleStepFraction * resolution_cm;
     const long num_steps = static_cast<long>(std::floor(total_distance_cm / step_cm));
     for (long i = 1; i < num_steps; ++i) {
         const double t = (static_cast<double>(i) * step_cm) / total_distance_cm;
@@ -223,13 +212,7 @@ struct MovementPlan {
     return true;
 }
 
-// Safety rule: every voxel whose axis-aligned volume overlaps the drone's safety sphere (radius
-// drone_config_.radius, centered at the candidate's actual future world-space position -- see
-// `offset`) must be VoxelOccupancy::Empty, and that position itself must be within the map's
-// configured boundaries. Uses a closest-point-on-AABB test
-// (UserCommon::sphereIntersectsAxisAlignedBox) against each neighbor voxel's full volume, not
-// voxel-center-to-voxel-center distance, so a sphere that only clips a voxel's corner or face is
-// still caught even when that voxel's own center lies farther away than the radius.
+// A coarse pre-filter; the LiDAR performs the precise hit test.
 [[nodiscard]] bool isSafeVoxel(const Context& ctx, const VoxelIndex& idx, const Position3D& offset) {
     const common_types::MapConfig config = ctx.map.getMapConfig();
     const Position3D center = toWorldCenter(idx, config) + offset;
@@ -241,9 +224,7 @@ struct MovementPlan {
         return false;
     }
     const double radius_cm = numCm(ctx.drone.radius);
-    // +1 pads for `offset`, which itself can be up to half a voxel wide: a neighbor whose
-    // center would sit just past the plain radius-derived range can still be within reach of
-    // the true, offset-shifted sphere.
+    // Requires every voxel intersecting the drone's safety sphere to be Empty.
     const long voxel_radius = static_cast<long>(std::ceil(radius_cm / resolution_cm)) + 1;
 
     for (long dx = -voxel_radius; dx <= voxel_radius; ++dx) {
@@ -273,8 +254,8 @@ struct MovementPlan {
     const double dz = (to.z - from.z).force_numerical_value_in(cm);
     const double horizontal_dist_cm = std::sqrt(dx * dx + dy * dy);
 
-    const double world_horizontal_deg = std::atan2(dy, dx) * 180.0 / M_PI;
-    const double world_altitude_deg = std::atan2(dz, horizontal_dist_cm) * 180.0 / M_PI;
+    const double world_horizontal_deg = atan2Deg(dy, dx);
+    const double world_altitude_deg = atan2Deg(dz, horizontal_dist_cm);
 
     const double relative_horizontal_deg = normalizeDeg(world_horizontal_deg - numDeg(heading.horizontal));
     const double relative_altitude_deg = normalizeDeg(world_altitude_deg - numDeg(heading.altitude));
@@ -283,32 +264,40 @@ struct MovementPlan {
                         relative_altitude_deg * altitude_angle[deg]};
 }
 
+// Splits a magnitude into pieces no larger than max_magnitude.
+[[nodiscard]] std::vector<double> splitMagnitude(double total, double max_magnitude, double epsilon) {
+    if (total <= epsilon) {
+        return {};
+    }
+    if (!(max_magnitude > 0.0)) {
+        return {total};
+    }
+    std::vector<double> pieces;
+    double remaining = total;
+    while (remaining > epsilon) {
+        const double step = std::min(remaining, max_magnitude);
+        pieces.push_back(step);
+        remaining -= step;
+    }
+    return pieces;
+}
+
 // Appends Rotate commands summing to `signed_angle_deg`, each within `max_rotate_deg`.
 void pushChunkedRotate(std::deque<common_types::MovementCommand>& queue, double signed_angle_deg,
                         double max_rotate_deg) {
-    double remaining_abs = std::fabs(signed_angle_deg);
-    if (remaining_abs <= kAngleEpsilonDeg) {
+    const std::vector<double> pieces =
+        splitMagnitude(std::fabs(signed_angle_deg), max_rotate_deg, kAngleEpsilonDeg);
+    if (pieces.empty()) {
         return;
     }
     const common_types::RotationDirection direction =
         signed_angle_deg >= 0.0 ? common_types::RotationDirection::Left : common_types::RotationDirection::Right;
-    if (!(max_rotate_deg > 0.0)) {
-        // Defensive: a non-positive limit cannot be chunked meaningfully; issue one best-effort command.
+    for (const double piece_deg : pieces) {
         common_types::MovementCommand cmd;
         cmd.type = common_types::MovementCommandType::Rotate;
         cmd.rotation = direction;
-        cmd.angle = remaining_abs * horizontal_angle[deg];
+        cmd.angle = piece_deg * horizontal_angle[deg];
         queue.push_back(cmd);
-        return;
-    }
-    while (remaining_abs > kAngleEpsilonDeg) {
-        const double step = std::min(remaining_abs, max_rotate_deg);
-        common_types::MovementCommand cmd;
-        cmd.type = common_types::MovementCommandType::Rotate;
-        cmd.rotation = direction;
-        cmd.angle = step * horizontal_angle[deg];
-        queue.push_back(cmd);
-        remaining_abs -= step;
     }
 }
 
@@ -316,64 +305,33 @@ void pushChunkedRotate(std::deque<common_types::MovementCommand>& queue, double 
 // each within `max_advance_cm`.
 void pushChunkedAdvance(std::deque<common_types::MovementCommand>& queue, double distance_cm,
                          double max_advance_cm) {
-    double remaining = distance_cm;
-    if (remaining <= kDistanceEpsilonCm) {
-        return;
-    }
-    if (!(max_advance_cm > 0.0)) {
+    const std::vector<double> pieces = splitMagnitude(distance_cm, max_advance_cm, kDistanceEpsilonCm);
+    for (const double piece_cm : pieces) {
         common_types::MovementCommand cmd;
         cmd.type = common_types::MovementCommandType::Advance;
-        cmd.distance = remaining * cm;
+        cmd.distance = piece_cm * cm;
         queue.push_back(cmd);
-        return;
-    }
-    while (remaining > kDistanceEpsilonCm) {
-        const double step = std::min(remaining, max_advance_cm);
-        common_types::MovementCommand cmd;
-        cmd.type = common_types::MovementCommandType::Advance;
-        cmd.distance = step * cm;
-        queue.push_back(cmd);
-        remaining -= step;
     }
 }
 
 // Appends Elevate commands summing to `signed_distance_cm`, each within `max_elevate_cm`.
 void pushChunkedElevate(std::deque<common_types::MovementCommand>& queue, double signed_distance_cm,
                          double max_elevate_cm) {
-    double remaining_abs = std::fabs(signed_distance_cm);
-    if (remaining_abs <= kDistanceEpsilonCm) {
+    const std::vector<double> pieces =
+        splitMagnitude(std::fabs(signed_distance_cm), max_elevate_cm, kDistanceEpsilonCm);
+    if (pieces.empty()) {
         return;
     }
     const double sign = signed_distance_cm >= 0.0 ? 1.0 : -1.0;
-    if (!(max_elevate_cm > 0.0)) {
+    for (const double piece_cm : pieces) {
         common_types::MovementCommand cmd;
         cmd.type = common_types::MovementCommandType::Elevate;
-        cmd.distance = (sign * remaining_abs) * cm;
+        cmd.distance = (sign * piece_cm) * cm;
         queue.push_back(cmd);
-        return;
-    }
-    while (remaining_abs > kDistanceEpsilonCm) {
-        const double step = std::min(remaining_abs, max_elevate_cm);
-        common_types::MovementCommand cmd;
-        cmd.type = common_types::MovementCommandType::Elevate;
-        cmd.distance = (sign * step) * cm;
-        queue.push_back(cmd);
-        remaining_abs -= step;
     }
 }
 
-// Converts a sequence of single-voxel grid steps (each differing from its predecessor by
-// exactly one resolution step along one axis) into a queue of bounded MovementCommands, rotating
-// to face each horizontal run before advancing into it.
-//
-// Consecutive path steps that continue in the same direction (same axis, same sign) are merged
-// into one run and issued as the largest legal Advance/Elevate commands the drone's limits allow
-// (e.g. five consecutive +x steps at 10cm resolution become a single 50cm Advance if max_advance
-// permits, or 100+100+30 if max_advance is 100cm) instead of one command per resolution-sized
-// step. This never skips validation of the intermediate voxels: the caller's path search (BFS /
-// adjacency check) already validated every grid cell in `path` individually before it ever
-// reaches here -- merging only changes how many MovementCommands carry that already-validated
-// distance, never which voxels get entered.
+// Converts a validated voxel path into bounded movement commands, merging consecutive runs.
 [[nodiscard]] MovementPlan buildMovementQueue(const Context& ctx, const Orientation& start_heading,
                                                const VoxelIndex& start, const std::vector<VoxelIndex>& path) {
     MovementPlan plan;
@@ -405,8 +363,8 @@ void pushChunkedElevate(std::deque<common_types::MovementCommand>& queue, double
             pushChunkedElevate(plan.commands, static_cast<double>(dir_z) * run_length * resolution_cm,
                                 max_elevate_cm);
         } else if (dir_x != 0 || dir_y != 0) {
-            const double target_heading_deg = std::atan2(static_cast<double>(dir_y), static_cast<double>(dir_x)) *
-                                                180.0 / M_PI;
+            const double target_heading_deg =
+                atan2Deg(static_cast<double>(dir_y), static_cast<double>(dir_x));
             const double diff_deg = normalizeDeg(target_heading_deg - heading_deg);
             if (std::fabs(diff_deg) > kAngleEpsilonDeg) {
                 pushChunkedRotate(plan.commands, diff_deg, max_rotate_deg);
@@ -439,8 +397,7 @@ void pushChunkedElevate(std::deque<common_types::MovementCommand>& queue, double
 
 } // namespace
 
-// Per-instance state that must persist across nextStep() calls. See the pImpl comment in
-// MappingAlgorithmImpl.h for why this lives here rather than as header-visible members.
+// Per-instance state persisted across nextStep() calls.
 struct MappingAlgorithmImpl::Impl {
     Phase phase = Phase::Sweep;
     std::deque<common_types::MovementCommand> pending_moves{};
@@ -464,14 +421,7 @@ struct MappingAlgorithmImpl::Impl {
     std::optional<VoxelIndex> pending_scan_frontier{};
     bool pending_scan_in_frontier_phase = false;
 
-    // Set by either phase when the movement queue just built (by frontierStep(), or by
-    // sweepStep()'s one-candidate-ahead pipeline) ends by reaching a planned scan target: the
-    // scan orientation to attach to that queue's *final* command, once popPendingMove() actually
-    // pops it, plus the target/frontier pair for the bookkeeping resolvePendingScan() needs
-    // afterward. Computed against the *predicted* post-movement state up front, before any of the
-    // queue's movement commands have executed. pending_moves_scan_frontier distinguishes which
-    // phase set it, exactly as scanCommand()'s own `frontier` parameter does: present for a
-    // Frontier-phase scan, nullopt for a Sweep-phase one (see popPendingMove()).
+    // Deferred scan attached to the final command of the current movement queue.
     std::optional<Orientation> pending_moves_scan_orientation{};
     std::optional<VoxelIndex> pending_moves_scan_target{};
     std::optional<VoxelIndex> pending_moves_scan_frontier{};
@@ -492,6 +442,18 @@ private:
     void initSweepBounds(const Context& ctx, const VoxelIndex& start);
     [[nodiscard]] bool advanceSweepCandidate();
     [[nodiscard]] common_types::MappingStepCommand popPendingMove();
+
+    // Extends an in-lane Sweep batch across consecutive safe Empty cells.
+    [[nodiscard]] std::vector<VoxelIndex> extendSweepBatch(const Context& ctx, const VoxelIndex& candidate,
+                                                            long dx, long dy, long dz, const Position3D& offset,
+                                                            const common_types::MapConfig& config);
+    // Schedules a scan on the final command of a Sweep movement batch.
+    void preparePipelinedSweepScan(const Context& ctx, const common_types::DroneState& state,
+                                   const common_types::MapConfig& config, const VoxelIndex& batch_tail,
+                                   const Position3D& offset, double final_heading_deg);
+    // Schedules the Frontier scan on the final movement command.
+    void preparePipelinedFrontierScan(const Context& ctx, const common_types::DroneState& state,
+                                      const BfsResult& bfs, const Position3D& offset, double final_heading_deg);
 
     [[nodiscard]] std::optional<VoxelIndex> findUntriedTargetNear(const Context& ctx, const VoxelIndex& s);
     [[nodiscard]] BfsResult frontierBfs(const Context& ctx, const VoxelIndex& start, const Position3D& offset);
@@ -522,10 +484,7 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::popPendingMove() {
     pending_moves.pop_front();
     common_types::MappingStepCommand result = movementOnlyCommand(cmd);
 
-    // Movement is always dispatched before a scan within a single MappingStepCommand (see
-    // DroneControlImpl::step()), so attaching the planned scan to this exact command -- once it
-    // is the last one standing between the drone and the position that scan was aimed from --
-    // performs the movement and the scan in one mission step instead of two.
+    // Attach a deferred scan only to the queue's final movement command.
     if (pending_moves.empty() && pending_moves_scan_orientation) {
         result.scan_orientation = pending_moves_scan_orientation;
         pending_scan_target = pending_moves_scan_target;
@@ -628,24 +587,12 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::sweepStep(const Con
         initSweepBounds(ctx, cur);
     }
 
-    // The next sweep candidate is only ever moved into directly when it is exactly one
-    // resolution step (face-adjacent) from `cur`. That holds for ordinary lane progress and for
-    // a row-boundary pivot (see advanceSweepCandidate), but not for the rarer case where a full
-    // xy-layer has just been completed and the cursor wraps back to the layer's starting row
-    // while also stepping up to the next z-layer - that wrap is more than one voxel away from
-    // `cur`. In every case where the candidate is not face-adjacent, or is face-adjacent but
-    // blocked (Occupied / OutOfBounds / an Empty cell failing the sphere safety check, or a
-    // target already scanned the maximum number of times without resolving), defer this one
-    // step to the Frontier phase, which performs a properly step-validated BFS instead of a
-    // single straight-line movement that would skip over unvalidated intermediate cells. This is
-    // a one-step detour, not a permanent mode switch: `phase` stays Sweep (see below) so the
-    // sweep cursor — now advanced past the cell that blocked it — gets retried on the next call,
-    // instead of abandoning the systematic sweep for the rest of the mission over one obstacle.
+    // Direct Sweep movement is allowed only to a safe face-adjacent candidate.
     const VoxelIndex candidate = sweep_candidate;
     const long dx = candidate.ix - cur.ix;
     const long dy = candidate.iy - cur.iy;
     const long dz = candidate.iz - cur.iz;
-    const bool candidate_is_face_adjacent = std::abs(dx) + std::abs(dy) + std::abs(dz) == 1;
+    const bool candidate_is_face_adjacent = isFaceAdjacent(candidate, cur);
 
     if (candidate_is_face_adjacent) {
         const common_types::VoxelOccupancy occ = ctx.map.atVoxel(toWorldCenter(candidate, config));
@@ -658,53 +605,13 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::sweepStep(const Con
             isSafeVoxel(ctx, candidate, intraVoxelOffset(ctx, state))) {
             const Position3D offset = intraVoxelOffset(ctx, state);
 
-            // Batch: extend the movement path forward past `candidate` over as many *further*
-            // consecutive cells as remain already-confirmed Empty + safe, using the exact same
-            // per-cell check as `candidate` itself got above -- stopping the instant one fails
-            // (Unmapped/PotentiallyOccupied/Occupied/out-of-bounds/unsafe), and never crossing a
-            // lane pivot or layer transition (checked the same way advanceSweepCandidate() itself
-            // decides a lane is exhausted: `peek_x` leaving [sweep_min_x, sweep_max_x]), since
-            // that stays out of scope for this checkpoint. `batch` is then handed to
-            // buildMovementQueue() as one path, letting the existing run-merging logic from the
-            // previous checkpoint compress it into as few Advance commands as max_advance allows,
-            // instead of returning to this state machine once per voxel.
-            //
-            // Extension only happens when `candidate` itself was reached by a pure in-lane step
-            // from `cur` (same y/z, dx == sweep_dir_x). `candidate` can instead itself be a
-            // row-pivot or layer-transition destination (dy/dz differs from `cur`, or dx doesn't
-            // match the current lane direction) -- advanceSweepCandidate() already flips
-            // sweep_dir_x as part of producing such a candidate, so extending from it via
-            // sweep_dir_x would silently fold that pivot/transition move together with several
-            // cells of the *new* lane into one batch, which is exactly the lane/layer crossing
-            // this checkpoint excludes. In that case `candidate` is handled entirely on its own
-            // (batch of size 1, same as pre-batching); the new lane only becomes batchable on the
-            // *following* sweepStep() call, once the drone has actually arrived there.
-            std::vector<VoxelIndex> batch{candidate};
-            VoxelIndex batch_tail = candidate;
-            if (dy == 0 && dz == 0 && dx == sweep_dir_x) {
-                while (true) {
-                    const long peek_x = batch_tail.ix + sweep_dir_x;
-                    if (peek_x < sweep_min_x || peek_x > sweep_max_x) {
-                        break; // Would require a lane pivot -- out of scope for this checkpoint.
-                    }
-                    const VoxelIndex peek{peek_x, batch_tail.iy, batch_tail.iz};
-                    if (ctx.map.atVoxel(toWorldCenter(peek, config)) != common_types::VoxelOccupancy::Empty ||
-                        !isSafeVoxel(ctx, peek, offset)) {
-                        break;
-                    }
-                    batch.push_back(peek);
-                    batch_tail = peek;
-                }
-            }
+            const std::vector<VoxelIndex> batch = extendSweepBatch(ctx, candidate, dx, dy, dz, offset, config);
+            const VoxelIndex batch_tail = batch.back();
 
             const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, batch);
             pending_moves = plan.commands;
 
-            // Consume exactly the batched cells from the *real* sweep cursor -- one
-            // advanceSweepCandidate() call per cell batched, reproducing precisely the sequence
-            // of cursor states that handling each of them on its own sweepStep() call would have
-            // produced. None of these calls can themselves pivot or exhaust the sweep volume: the
-            // peek loop above already stopped before any such transition.
+            // Advance the Sweep cursor once for every batched cell.
             bool sweep_exhausted = false;
             for (std::size_t consumed = 0; consumed < batch.size(); ++consumed) {
                 sweep_exhausted = advanceSweepCandidate();
@@ -713,33 +620,9 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::sweepStep(const Con
                 phase = Phase::Frontier;
             }
 
-            // Pipeline: `batch` (now safely known to be Empty) is about to be moved into in full;
-            // the cursor above already landed on the candidate *after* the batch, and its
-            // occupancy in today's map is unaffected by that future move, so it can be evaluated
-            // right now. If that candidate is face-adjacent to the batch's last cell -- true for
-            // ordinary lane progress and, per advanceSweepCandidate(), for most row-boundary
-            // pivots too; only the rarer full-layer wrap is not (see the comment above this
-            // function's `candidate_is_face_adjacent` check) -- and still needs a scan (Unmapped
-            // or PotentiallyOccupied), attach that scan to the batch's final movement command,
-            // combining them into one mission step. Only a single candidate ahead is peeked at
-            // here: the *next* pipelined scan, if any, is decided fresh on the *following*
-            // sweepStep() call, once the drone has actually arrived at the end of this batch.
+            // Pipeline a scan for the next Sweep candidate onto the batch's final movement.
             if (!sweep_exhausted && !pending_moves.empty()) {
-                const VoxelIndex next_candidate = sweep_candidate;
-                const long ndx = next_candidate.ix - batch_tail.ix;
-                const long ndy = next_candidate.iy - batch_tail.iy;
-                const long ndz = next_candidate.iz - batch_tail.iz;
-                const bool next_is_face_adjacent = std::abs(ndx) + std::abs(ndy) + std::abs(ndz) == 1;
-                if (next_is_face_adjacent &&
-                    isTargetOccupancy(ctx.map.atVoxel(toWorldCenter(next_candidate, config)))) {
-                    const Position3D predicted_position = toWorldCenter(batch_tail, config) + offset;
-                    const Orientation predicted_heading{plan.final_heading_deg * horizontal_angle[deg],
-                                                         state.heading.altitude};
-                    pending_moves_scan_orientation = relativeScanOrientation(
-                        predicted_position, toWorldCenter(next_candidate, config), predicted_heading);
-                    pending_moves_scan_target = next_candidate;
-                    pending_moves_scan_frontier.reset(); // Sweep-phase scan (see resolvePendingScan()).
-                }
+                preparePipelinedSweepScan(ctx, state, config, batch_tail, offset, plan.final_heading_deg);
             }
 
             if (!pending_moves.empty()) {
@@ -750,13 +633,56 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::sweepStep(const Con
         sweep_repeat_scan_count = 0;
     }
 
-    // Skip this candidate — Frontier's BFS will pick it up later if/when it becomes reachable
-    // from elsewhere — and let one Frontier-driven action make safe progress now. Only a fully
-    // exhausted sweep volume (cursor has walked off the end) is a genuine permanent transition.
+    // Let Frontier handle candidates that Sweep cannot enter directly.
     if (advanceSweepCandidate()) {
         phase = Phase::Frontier;
     }
     return frontierStep(ctx, state);
+}
+
+// Extends a pure in-lane Sweep batch across consecutive safe Empty cells.
+std::vector<VoxelIndex> MappingAlgorithmImpl::Impl::extendSweepBatch(const Context& ctx,
+                                                                     const VoxelIndex& candidate, long dx, long dy,
+                                                                     long dz, const Position3D& offset,
+                                                                     const common_types::MapConfig& config) {
+    std::vector<VoxelIndex> batch{candidate};
+    VoxelIndex batch_tail = candidate;
+    if (dy == 0 && dz == 0 && dx == sweep_dir_x) {
+        while (true) {
+            const long peek_x = batch_tail.ix + sweep_dir_x;
+            if (peek_x < sweep_min_x || peek_x > sweep_max_x) {
+                break; // Stop before a lane pivot.
+            }
+            const VoxelIndex peek{peek_x, batch_tail.iy, batch_tail.iz};
+            if (ctx.map.atVoxel(toWorldCenter(peek, config)) != common_types::VoxelOccupancy::Empty ||
+                !isSafeVoxel(ctx, peek, offset)) {
+                break;
+            }
+            batch.push_back(peek);
+            batch_tail = peek;
+        }
+    }
+    return batch;
+}
+
+// Attaches a scan for the next face-adjacent target to the batch's final movement.
+void MappingAlgorithmImpl::Impl::preparePipelinedSweepScan(const Context& ctx, const common_types::DroneState& state,
+                                                            const common_types::MapConfig& config,
+                                                            const VoxelIndex& batch_tail, const Position3D& offset,
+                                                            double final_heading_deg) {
+    const VoxelIndex next_candidate = sweep_candidate;
+    if (!isFaceAdjacent(next_candidate, batch_tail)) {
+        return;
+    }
+    if (!isTargetOccupancy(ctx.map.atVoxel(toWorldCenter(next_candidate, config)))) {
+        return;
+    }
+    const Position3D predicted_position = toWorldCenter(batch_tail, config) + offset;
+    const Orientation predicted_heading{final_heading_deg * horizontal_angle[deg], state.heading.altitude};
+    pending_moves_scan_orientation = relativeScanOrientation(
+        predicted_position, toWorldCenter(next_candidate, config), predicted_heading);
+    pending_moves_scan_target = next_candidate;
+    pending_moves_scan_frontier.reset(); // Sweep-phase scan
 }
 
 std::optional<VoxelIndex> MappingAlgorithmImpl::Impl::findUntriedTargetNear(const Context& ctx,
@@ -871,20 +797,14 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::frontierStep(const 
     if (phase == Phase::Done) {
         return statusOnlyCommand(final_status);
     }
-    // Deliberately does not set `phase = Phase::Frontier` here: this function is also called as
-    // a one-step detour from sweepStep() while `phase` is still Sweep, and must not permanently
-    // latch Frontier in that case (see sweepStep()'s comment). Genuine permanent transitions are
-    // set by the caller (initSweepBounds() / sweepStep() on sweep-volume exhaustion) before
-    // reaching here, or below in this function once the mission is truly Done.
+    // May be called as a temporary Sweep detour, so it does not force Phase::Frontier.
 
     const VoxelIndex cur = toVoxelIndex(state.position, ctx.map.getMapConfig());
     const Position3D offset = intraVoxelOffset(ctx, state);
 
     const BfsResult bfs = frontierBfs(ctx, cur, offset);
     if (!bfs.found) {
-        // One-time fallback boundary scan, as explicitly allowed by the assignment spec, to
-        // distinguish a fully-mapped map from unresolved voxels that incremental frontier
-        // discovery never reached (e.g. fully enclosed pockets).
+        // Final check distinguishes a complete map from unreachable unresolved voxels.
         final_status = hasAnyUnresolvedVoxel(ctx) ? common_types::AlgorithmStatus::FinishedWithUnmappableVoxels
                                                    : common_types::AlgorithmStatus::Finished;
         phase = Phase::Done;
@@ -898,31 +818,29 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::frontierStep(const 
     const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, bfs.path);
     pending_moves = plan.commands;
     if (pending_moves.empty()) {
-        // Defensive: a non-trivial path with no resulting commands should not happen since
-        // bfs.frontier != cur, but guard against an infinite stall regardless.
+        // Prevent an infinite stall if a non-trivial path yields no movement.
         final_status = common_types::AlgorithmStatus::FinishedWithUnmappableVoxels;
         phase = Phase::Done;
         return statusOnlyCommand(final_status);
     }
 
-    // The queue above ends exactly at bfs.frontier (buildMovementQueue's path is bfs.path in
-    // full). Rather than waiting for a later nextStep() call to observe arrival and spend a
-    // whole extra step on a separate scan-only command, predict the state the drone will be in
-    // once every queued command has executed -- position from bfs.frontier's own voxel center
-    // plus the same intra-voxel offset the drone carries today (an exact-multiples-of-resolution
-    // Advance/Elevate preserves that offset, the same assumption isSafeVoxel already relies on),
-    // heading from the plan's final_heading_deg (Elevate never changes it, and Advance legs only
-    // rotate before advancing, so the last rotate the plan issued is the drone's final heading)
-    // -- and attach the resulting scan_orientation to the queue's *last* command once it is
-    // popped (see popPendingMove()), combining that movement and the scan into one mission step.
+    // Pipeline the Frontier scan onto the queue's final movement command.
+    preparePipelinedFrontierScan(ctx, state, bfs, offset, plan.final_heading_deg);
+
+    return popPendingMove();
+}
+
+// Predicts the post-movement state and schedules the Frontier scan.
+void MappingAlgorithmImpl::Impl::preparePipelinedFrontierScan(const Context& ctx,
+                                                               const common_types::DroneState& state,
+                                                               const BfsResult& bfs, const Position3D& offset,
+                                                               double final_heading_deg) {
     const Position3D predicted_position = toWorldCenter(bfs.frontier, ctx.map.getMapConfig()) + offset;
-    const Orientation predicted_heading{plan.final_heading_deg * horizontal_angle[deg], state.heading.altitude};
+    const Orientation predicted_heading{final_heading_deg * horizontal_angle[deg], state.heading.altitude};
     const Position3D target_center = toWorldCenter(bfs.target, ctx.map.getMapConfig());
     pending_moves_scan_orientation = relativeScanOrientation(predicted_position, target_center, predicted_heading);
     pending_moves_scan_target = bfs.target;
     pending_moves_scan_frontier = bfs.frontier;
-
-    return popPendingMove();
 }
 
 MappingAlgorithmImpl::MappingAlgorithmImpl(

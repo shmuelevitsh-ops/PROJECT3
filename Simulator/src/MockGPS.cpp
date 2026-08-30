@@ -4,11 +4,9 @@ namespace simulator {
 
 MockGPS::MockGPS(
     common::Position3D position,
-    common::Orientation heading,
-    common::PhysicalLength resolution)
+    common::Orientation heading)
     : position_(position),
-      heading_(heading),
-      resolution_(resolution) {}
+      heading_(heading) {}
 
 common::Position3D MockGPS::position() const {
     return position_;

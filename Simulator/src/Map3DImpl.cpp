@@ -36,10 +36,7 @@ constexpr std::size_t kNumAxes = 3;
 
 using VoxelIndex = std::array<long, kNumAxes>;
 
-// Converts a world position into voxel indices using the formula:
-//   idx = floor((world_coordinate + offset) / resolution)
-// Returns std::nullopt if the map has no usable resolution (e.g. a default
-// MapConfig), since indices cannot be derived in that case.
+// Voxel index = floor((world coordinate + offset) / resolution).
 [[nodiscard]] std::optional<VoxelIndex> computeIndex(const Position3D& pos,
                                                        const types::MapConfig& config) {
     const double resolution_cm = config.resolution.force_numerical_value_in(cm);

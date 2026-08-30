@@ -8,8 +8,7 @@ class MockGPS final : public common::IGPS {
 public:
     MockGPS(
         common::Position3D position,
-        common::Orientation heading,
-        common::PhysicalLength resolution);
+        common::Orientation heading);
 
     [[nodiscard]] common::Position3D position() const override;
     [[nodiscard]] common::Orientation heading() const override;
@@ -20,7 +19,6 @@ public:
 private:
     common::Position3D position_{};
     common::Orientation heading_{};
-    common::PhysicalLength resolution_{};
 };
 
 } // namespace simulator

@@ -27,37 +27,21 @@ using common::z_extent;
 
 namespace {
 
-// Upper bound on how many times legalMovementFraction nudges its candidate fraction toward zero
-// (via std::nextafter) while searching for one output_map_.isInBounds() actually accepts. Each
-// nudge is the smallest possible step for a double, so this is far more headroom than any
-// realistic candidate should need to converge.
+// DroneStepStatus::Error is recorded but does not terminate the mission.
 constexpr int kMaxBoundaryNudges = 64;
 
 [[nodiscard]] double numCm(common::PhysicalLength v) { return v.force_numerical_value_in(cm); }
 
-// Total number of times mapping_algorithm_.nextStep() is called, within a single call to
-// prepareNextSequence(), before giving up on a faulty Algorithm (Optional Common-Issues rows 3
-// and 4: an invalid-value command and a faulty Working NOOP share this one budget -- three
-// rejected attempts of either kind, in any mix, exhausts it).
+// Maximum retries for invalid or NOOP Algorithm commands.
 constexpr int kMaxAlgorithmAttempts = 3;
 
-// Total number of times lidar_.scan() is attempted, for one requested scan, before giving up on a
-// faulty LiDAR (Optional Common-Issues row 6: "The LiDAR returns an empty vector"). Only the scan
-// itself is retried -- never the Algorithm call or the movement that may have preceded it.
+// Maximum retries for invalid or NOOP Algorithm commands.
 constexpr int kMaxLidarScanAttempts = 3;
 
-// Total number of times the same already-prepared movement chunk (post row-10 amendment, post
-// row-8 splitting) is dispatched to movement_, before giving up on a faulty movement driver
-// (Optional Common-Issues row 7: "The movement driver returns false"). Only a MovementResult with
-// success=false is retried this way -- a thrown exception (e.g. a real wall collision MockMovement
-// alone can detect) is a distinct, non-retried failure mode, unchanged from before this row
-// existed.
+// Maximum retries for an empty LiDAR scan.
 constexpr int kMaxMovementAttempts = 3;
 
-// Row 3 ("A faulty algorithm returned a command with invalid values"): only non-finite ACTIVE
-// numeric fields are rejected. Negative/zero/oversized-but-finite values, unused MovementCommand
-// fields, and enum values are all left for other rows (8, 10) or are simply not this row's
-// concern.
+// Rejects non-finite values in active movement fields.
 [[nodiscard]] bool isMovementCommandValid(const common_types::MovementCommand& movement) {
     switch (movement.type) {
         case common_types::MovementCommandType::Hover:
@@ -94,13 +78,7 @@ constexpr int kMaxMovementAttempts = 3;
            !command.movement.has_value() && !command.scan_orientation.has_value();
 }
 
-// The (dx, dy, dz), in cm, that `movement` would apply from `state` if run at full requested
-// distance. Only Advance (x/y, via current heading) and Elevate (z) change position; the caller
-// only calls this for those two types. Advance's direction uses the shared
-// user_common_322889890_315113738::advanceDirection() -- the same one MockMovement::advance()
-// itself uses to actually move the drone -- so this prediction and the real post-movement GPS
-// position it is later checked against (Optional Common-Issues row 12) can never disagree merely
-// from the two sides computing cos/sin direction differently.
+// Cartesian displacement produced by a position-changing movement.
 struct MovementDelta {
     double dx_cm = 0.0;
     double dy_cm = 0.0;
@@ -145,18 +123,7 @@ struct MovementDelta {
     return applyDelta(start, delta, 1.0);
 }
 
-// Numerical (not physical) tolerance for comparing a post-movement GPS reading against the
-// physically-expected internal position (Optional Common-Issues row 12). Sized to absorb only
-// ordinary double/trigonometric rounding -- e.g. si::cos/sin of a heading, scaled by a large
-// dispatched distance -- never a genuine GPS discrepancy. A fixed fraction of magnitude (e.g.
-// 1e-9 * scale) scales the wrong way: at a coordinate of 1e9cm it would already tolerate ~1cm of
-// real error, which is a physical "close enough" range, not a rounding artifact. Instead the
-// relative term is machine-epsilon-based -- each floating-point operation in the expected-position
-// computation (a trig call, a multiplication, an addition) can introduce at most about one ULP of
-// relative error at the operands' own magnitude, so a small constant multiple of
-// std::numeric_limits<double>::epsilon() times that magnitude safely bounds the accumulated
-// rounding without ever approaching a genuine physical discrepancy. kGpsPositionAbsoluteFloorCm
-// only matters near zero, where the epsilon-scaled term itself vanishes.
+// Tolerance for floating-point error when validating GPS against expected position.
 constexpr double kGpsPositionAbsoluteFloorCm = 1e-9;
 constexpr double kGpsPositionEpsilonSafetyFactor = 8.0;
 
@@ -179,11 +146,7 @@ constexpr double kGpsPositionEpsilonSafetyFactor = 8.0;
 // 12).
 constexpr int kGpsPostMovementRetryAttempts = 3;
 
-// Largest fraction t in [0,1] of a displacement `delta_cm` (starting at `start_cm`) that, by
-// getMapConfig().boundaries' numbers alone, would stay within [min_cm, max_cm]. This is only a
-// first estimate for legalMovementFraction below -- it deliberately does not assume which side of
-// [min_cm, max_cm] is inclusive; output_map_.isInBounds() is what actually decides that. A zero
-// delta is unconstrained along this axis.
+// Estimates the largest displacement fraction that stays within one axis.
 [[nodiscard]] double estimateLegalFraction(double start_cm, double delta_cm, double min_cm, double max_cm) {
     if (delta_cm > 0.0) {
         return (max_cm - start_cm) / delta_cm;
@@ -194,13 +157,7 @@ constexpr int kGpsPostMovementRetryAttempts = 3;
     return 1.0;
 }
 
-// Fraction (in [0,1]) of a position-changing movement's full requested distance that is legal
-// from `state`, according to `output_map`: output_map.isInBounds() is the sole authority on
-// legality here. getMapConfig().boundaries is used only to produce a first estimate of how much
-// distance should fit; that estimate is then verified against isInBounds(), and nudged toward the
-// start position with std::nextafter (never by a fixed physical distance) if the map's own
-// in-bounds semantics turn out to exclude it. Returns 0.0 if no non-zero legal fraction is found
-// within kMaxBoundaryNudges nudges.
+// Finds the largest movement fraction accepted by output_map_.isInBounds().
 [[nodiscard]] double legalMovementFraction(const common::IMutableMap3D& output_map,
                                             const MovementDelta& delta,
                                             const common_types::DroneState& state,
@@ -227,23 +184,10 @@ constexpr int kGpsPostMovementRetryAttempts = 3;
     return 0.0;
 }
 
-// Safety-factor multiplier applied to the true double-rounding-error bound used to decide
-// whether a post-subtraction residue in splitMagnitude() is genuine floating-point noise. A
-// fixed fraction *of max_magnitude* (e.g. 1e-9 * max_magnitude) scales the wrong way: with a huge
-// max_magnitude (e.g. 1e9cm) it would silently swallow a real, much smaller remainder (e.g.
-// 0.5cm). The bound used instead is derived from std::numeric_limits<double>::epsilon() and the
-// scale of `magnitude` itself -- each of the N subtractions performed can introduce at most about
-// one ULP of rounding error at that scale, so (N+1) * epsilon * magnitude is a safe upper bound on
-// the total accumulated error; this factor just pads that bound a little further.
+// Safety factor for accumulated floating-point error while splitting movements.
 constexpr double kSplitToleranceSafetyFactor = 4.0;
 
-// Splits `total` (a signed magnitude, e.g. cm or deg) into pieces of magnitude at most
-// `max_magnitude`, each carrying the same sign as `total`, summing to `total` within ordinary
-// floating-point tolerance. Returns a single-element {total} -- i.e. "no split needed" -- when
-// `max_magnitude` is non-positive (an unconfigured/degenerate limit never splits) or `total`
-// already fits within one piece; the caller relies on that single-element result to mean
-// "dispatch unchanged" (checking pieces.size() <= 1), so this never returns a single-element
-// vector for any other reason.
+// Splits a signed magnitude into pieces no larger than max_magnitude.
 [[nodiscard]] std::vector<double> splitMagnitude(double total, double max_magnitude) {
     const double magnitude = std::abs(total);
     if (!(max_magnitude > 0.0) || magnitude <= max_magnitude) {
@@ -274,12 +218,7 @@ constexpr double kSplitToleranceSafetyFactor = 4.0;
     return pieces;
 }
 
-// Splits a single movement into DroneConfigData-sized chunks (Optional Common-Issues: "Algorithm
-// returned a movement bigger than the max allowed" -- a defense against a faulty Algorithm; a
-// valid one already respects these limits). `movement` is assumed to already be the *legal*
-// movement (post OOB-amendment for Advance/Elevate): this function only ever shortens for size,
-// never re-checks map bounds. Hover is never split. A movement that already fits within its
-// type's limit is returned as a single unchanged chunk.
+// Splits a movement into chunks that respect the drone's configured limits.
 [[nodiscard]] std::deque<common_types::MovementCommand> splitMovement(
     const common_types::MovementCommand& movement, const common_types::DroneConfigData& drone) {
     std::deque<common_types::MovementCommand> chunks;
@@ -326,14 +265,12 @@ constexpr double kSplitToleranceSafetyFactor = 4.0;
 } // namespace
 
 DroneControlImpl::DroneControlImpl(common_types::DroneConfigData drone,
-                                   common_types::MissionConfigData mission,
-                                   common::ILidar& lidar,
-                                   common::IGPS& gps,
+                                   const common::ILidar& lidar,
+                                   const common::IGPS& gps,
                                    common::IDroneMovement& movement,
                                    common::IMutableMap3D& output_map,
                                    common::IMappingAlgorithm& mapping_algorithm)
     : drone_(std::move(drone)),
-      mission_(std::move(mission)),
       lidar_(lidar),
       gps_(gps),
       movement_(movement),
@@ -346,10 +283,7 @@ DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
     const common_types::LidarScanResult* latest_scan_ptr =
         latest_scan_ ? &(*latest_scan_) : nullptr;
 
-    // Optional Common-Issues rows 3 & 4: retry the same request (same DroneState/step_index, same
-    // latest_scan) against a faulty Algorithm that returns invalid values or a Working NOOP.
-    // Rejected attempts perform no movement/scan/map write and consume no separate step() --
-    // everything here happens before this step's movement/scan dispatch below.
+    // Retry invalid or NOOP Algorithm commands without advancing the step.
     common_types::MappingStepCommand command;
     bool accepted = false;
     for (int attempt = 0; attempt < kMaxAlgorithmAttempts; ++attempt) {
@@ -376,15 +310,7 @@ DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
 
     common_types::MovementCommand movement = *command.movement;
 
-    // Out-of-bounds handling (Optional Common-Issues scenario) applies first, to establish the
-    // total *legal* movement -- Advance/Elevate are the only position-changing movement types.
-    // output_map_.isInBounds() is the sole authority on whether a destination is legal: a
-    // movement whose full destination it accepts is legal unchanged; one it rejects is shortened
-    // -- using getMapConfig().boundaries only to estimate how much distance should fit, then
-    // re-verified against isInBounds() itself (see legalMovementFraction) -- to the maximum legal
-    // non-zero distance in the same direction. If no such distance remains (the drone is already
-    // at the relevant boundary), no movement chunk is produced at all, and the rest of the step
-    // (scan, status, step_index_) proceeds normally.
+    // Shorten position-changing movements to the largest legal in-bounds distance.
     if (movement.type == common_types::MovementCommandType::Advance ||
         movement.type == common_types::MovementCommandType::Elevate) {
         const MovementDelta delta = movementDelta(movement, state);
@@ -400,11 +326,64 @@ DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
         }
     }
 
-    // Oversized-command handling (Optional Common-Issues scenario): once the legal movement is
-    // known, split it into DroneConfigData-sized chunks -- a defense against a faulty Algorithm
-    // that requested more than drone_'s configured max in one command.
+    // Shorten position-changing movements to the largest legal in-bounds distance.
     pending.movements = splitMovement(movement, drone_);
     return pending;
+}
+
+std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchMovementAndValidateGps(
+    const common_types::MovementCommand& movement, const Orientation& heading) {
+    common_types::MovementResult result{};
+
+    // Retry the same movement chunk when the driver reports failure.
+    bool movement_succeeded = false;
+    for (int attempt = 0; attempt < kMaxMovementAttempts; ++attempt) {
+        switch (movement.type) {
+            case common_types::MovementCommandType::Hover:
+                break;
+            case common_types::MovementCommandType::Rotate:
+                result = movement_.rotate(movement.rotation, movement.angle);
+                break;
+            case common_types::MovementCommandType::Advance:
+                result = movement_.advance(movement.distance);
+                break;
+            case common_types::MovementCommandType::Elevate:
+                result = movement_.elevate(movement.distance);
+                break;
+        }
+
+        if (result.success) {
+            movement_succeeded = true;
+            break;
+        }
+    }
+
+    if (!movement_succeeded) {
+        pending_sequence_.reset();
+        throw std::runtime_error(
+            "DroneControlImpl::step: the movement driver returned failure " +
+            std::to_string(kMaxMovementAttempts) +
+            " times in a row for the same movement chunk: " + result.message);
+    }
+
+    // Advance the expected position, then verify it against GPS.
+    const Position3D expected_position = expectedPositionAfterMovement(*internal_position_, movement, heading);
+    internal_position_ = expected_position;
+
+    const std::optional<Position3D> validated_position = validatePostMovementGps(expected_position);
+    if (!validated_position.has_value()) {
+        // Discard the remaining sequence when the post-movement position cannot be verified.
+        pending_sequence_.reset();
+        return common_types::DroneStepResult{
+            common_types::DroneStepStatus::Error,
+            "DroneControlImpl::step: post-movement GPS position is inconsistent with the "
+            "movement just executed, even after retrying"};
+    }
+
+    // A reading (the first, or a later retry) matched: resynchronize the internal estimate
+    // to that accepted GPS value rather than leaving it at the merely-expected position.
+    internal_position_ = *validated_position;
+    return std::nullopt;
 }
 
 std::optional<Position3D> DroneControlImpl::validatePostMovementGps(const Position3D& expected) {
@@ -426,11 +405,46 @@ std::optional<Position3D> DroneControlImpl::validatePostMovementGps(const Positi
     return std::nullopt;
 }
 
-common_types::DroneStepResult DroneControlImpl::step() {
-    // Optional Common-Issues row 11 ("The GPS returns out-of-bound coordinates"): read GPS once,
-    // before consulting the Algorithm or dispatching any pending chunk, and use output_map_ (the
-    // sole authority on legality elsewhere in this class) to judge it.
-    const Position3D gps_position = gps_.position();
+std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchScanAndApplyToMap(
+    const Orientation& scan_orientation, const Position3D& post_move_pos,
+    const Orientation& post_move_heading) {
+    // Retry empty scans; scan exceptions are returned immediately as errors.
+    common_types::LidarScanResult scan;
+    bool scan_accepted = false;
+    for (int attempt = 0; attempt < kMaxLidarScanAttempts; ++attempt) {
+        try {
+            scan = lidar_.scan(scan_orientation);
+        } catch (const std::exception& e) {
+            return common_types::DroneStepResult{
+                common_types::DroneStepStatus::Error, e.what()};
+        }
+        if (!scan.empty()) {
+            scan_accepted = true;
+            break;
+        }
+    }
+    if (!scan_accepted) {
+        throw std::runtime_error(
+            "DroneControlImpl::step: the LiDAR returned an empty scan " +
+            std::to_string(kMaxLidarScanAttempts) + " times in a row");
+    }
+
+    // Map-update failures become step errors without publishing the new scan.
+    try {
+        ScanResultToVoxels::applyToMap(
+            output_map_, post_move_pos, post_move_heading, scan, lidar_.config());
+    } catch (const std::exception& e) {
+        return common_types::DroneStepResult{
+            common_types::DroneStepStatus::Error, e.what()};
+    }
+    latest_scan_ = scan;
+    return std::nullopt;
+}
+
+std::optional<common_types::DroneStepResult> DroneControlImpl::handlePreStepGps(
+    Position3D& gps_position) {
+    // Validates the GPS reading before starting the step.
+    gps_position = gps_.position();
 
     if (!output_map_.isInBounds(gps_position)) {
         if (!internal_position_.has_value()) {
@@ -447,13 +461,7 @@ common_types::DroneStepResult DroneControlImpl::step() {
                 "DroneControlImpl::step: GPS returned an out-of-bounds position and the internal "
                 "position baseline is also out of bounds");
         }
-        // A plausible internal baseline says this GPS sample is spurious: ignore it entirely --
-        // no Algorithm call, no movement, no scan/map write, and never substitute
-        // internal_position_ in place of the rejected reading. Any pending oversized-movement
-        // sequence (row 8) is left untouched, since no chunk was dispatched this step, so a later
-        // valid step resumes the same chunk without recalling the Algorithm. This still counts as
-        // a step so that repeated bad samples consume the max_steps budget instead of looping
-        // forever.
+        // Ignore a bad GPS sample when the internal baseline remains valid.
         ++step_index_;
         return common_types::DroneStepResult{
             common_types::DroneStepStatus::Continue, "ignored out-of-bounds GPS reading"};
@@ -461,6 +469,16 @@ common_types::DroneStepResult DroneControlImpl::step() {
 
     if (!internal_position_.has_value()) {
         internal_position_ = gps_position;
+    }
+
+    return std::nullopt;
+}
+
+common_types::DroneStepResult DroneControlImpl::step() {
+    Position3D gps_position{};
+    const std::optional<common_types::DroneStepResult> gps_error = handlePreStepGps(gps_position);
+    if (gps_error.has_value()) {
+        return *gps_error;
     }
 
     if (!pending_sequence_) {
@@ -477,87 +495,16 @@ common_types::DroneStepResult DroneControlImpl::step() {
         pending.movements.pop_front();
     }
 
-    // Movement is executed before any scan, per MappingStepCommand's contract. A thrown exception
-    // (e.g. MockMovement rejecting a real wall collision it alone can see) is a fatal simulation-
-    // run failure, not a recoverable step outcome: it is left to propagate out of step() unchanged
-    // -- never caught here, never converted into a DroneStepStatus::Error, and never retried
-    // (Optional Common-Issues row 7 covers only a returned success=false, not an exception).
+    // Movement precedes scanning; movement exceptions propagate unchanged.
     if (movement_to_dispatch) {
-        const common_types::MovementCommand& movement = *movement_to_dispatch;
-        common_types::MovementResult result{};
-
-        // Optional Common-Issues row 7 ("The movement driver returns false"): retry the exact
-        // same already-prepared chunk (post row-10 amendment, post row-8 splitting) up to
-        // kMaxMovementAttempts total driver calls. Never re-consults the Algorithm, never advances
-        // to a later pending row-8 chunk (pending.movements is untouched here), and never touches
-        // internal_position_/step_index_/scan state for a failed attempt -- only a genuinely
-        // successful attempt falls through to row 12 below. Hover never calls movement_ at all, so
-        // it is unaffected: `result` keeps its default success=true and the loop exits on its
-        // first iteration.
-        bool movement_succeeded = false;
-        for (int attempt = 0; attempt < kMaxMovementAttempts; ++attempt) {
-            switch (movement.type) {
-                case common_types::MovementCommandType::Hover:
-                    break;
-                case common_types::MovementCommandType::Rotate:
-                    result = movement_.rotate(movement.rotation, movement.angle);
-                    break;
-                case common_types::MovementCommandType::Advance:
-                    result = movement_.advance(movement.distance);
-                    break;
-                case common_types::MovementCommandType::Elevate:
-                    result = movement_.elevate(movement.distance);
-                    break;
-            }
-
-            if (result.success) {
-                movement_succeeded = true;
-                break;
-            }
+        const std::optional<common_types::DroneStepResult> movement_error =
+            dispatchMovementAndValidateGps(*movement_to_dispatch, pending.heading);
+        if (movement_error.has_value()) {
+            return *movement_error;
         }
-
-        if (!movement_succeeded) {
-            pending_sequence_.reset();
-            throw std::runtime_error(
-                "DroneControlImpl::step: the movement driver returned failure " +
-                std::to_string(kMaxMovementAttempts) +
-                " times in a row for the same movement chunk: " + result.message);
-        }
-
-        // Optional Common-Issues row 12 ("A movement executed but GPS updated with impossible
-        // coordinates"): the movement physically succeeded, so the internal estimate advances to
-        // where it should now be -- computed from the chunk actually dispatched above, under the
-        // heading this whole sequence was legalized/split under -- regardless of what GPS reports
-        // next.
-        const Position3D expected_position =
-            expectedPositionAfterMovement(*internal_position_, movement, pending.heading);
-        internal_position_ = expected_position;
-
-        const std::optional<Position3D> validated_position = validatePostMovementGps(expected_position);
-        if (!validated_position.has_value()) {
-            // Every reading -- the first plus kGpsPostMovementRetryAttempts retries -- disagrees
-            // with the physically-expected position: the drone's true position is now
-            // unverified, so no scan is taken and any remaining chunks of this oversized sequence
-            // are discarded rather than dispatched against an unverified location.
-            // internal_position_ stays at expected_position (set above), and, per the existing
-            // Error-path convention, step_index_ is not incremented for this failing step.
-            pending_sequence_.reset();
-            return common_types::DroneStepResult{
-                common_types::DroneStepStatus::Error,
-                "DroneControlImpl::step: post-movement GPS position is inconsistent with the "
-                "movement just executed, even after retrying"};
-        }
-
-        // A reading (the first, or a later retry) matched: resynchronize the internal estimate
-        // to that accepted GPS value rather than leaving it at the merely-expected position.
-        internal_position_ = *validated_position;
     }
 
-    // A chunk before the last one in a split sequence: this step() dispatched real movement (one
-    // chunk = one step, incrementing step_index_ exactly once), but the original command's scan
-    // and status are deferred to the final chunk, so MissionControl cannot see Finished/
-    // FinishedWithUnmappableVoxels -- and stop the mission -- before the whole legal movement has
-    // actually executed.
+    // Defer the command's scan and status until its final movement chunk.
     if (!pending.movements.empty()) {
         ++step_index_;
         latest_scan_ = std::nullopt;
@@ -570,55 +517,15 @@ common_types::DroneStepResult DroneControlImpl::step() {
     pending_sequence_.reset();
 
     if (scan_orientation.has_value()) {
-        // Movement + scan: `internal_position_` was just resynchronized above to the validated
-        // post-movement GPS reading (row 12), so reuse it as the scan origin rather than reading
-        // GPS a second time. No movement / scan-only: reuse the pre-step GPS reading that already
-        // passed row-11 validation -- never substitute internal_position_ for a GPS sample that
-        // was itself ignored/rejected.
+        // Use the validated post-movement position as the scan origin when movement occurred.
         const Position3D post_move_pos = movement_to_dispatch ? *internal_position_ : gps_position;
         const Orientation post_move_heading = gps_.heading();
 
-        // Optional Common-Issues row 6 ("The LiDAR returns an empty vector"): retry only the scan
-        // itself -- same orientation, no re-dispatched movement, no fresh Algorithm call -- up to
-        // kMaxLidarScanAttempts total attempts before giving up on a faulty LiDAR. A thrown
-        // exception from lidar_.scan() itself (e.g. its own map access failing) is a distinct,
-        // non-Row-6 failure mode: reported immediately as Error, never retried as if it were an
-        // empty result, and never touching step_index_/latest_scan_. This catch is scoped to just
-        // the lidar_.scan() call so the Row-6 exhaustion throw below stays outside it and keeps
-        // propagating unchanged.
-        common_types::LidarScanResult scan;
-        bool scan_accepted = false;
-        for (int attempt = 0; attempt < kMaxLidarScanAttempts; ++attempt) {
-            try {
-                scan = lidar_.scan(*scan_orientation);
-            } catch (const std::exception& e) {
-                return common_types::DroneStepResult{
-                    common_types::DroneStepStatus::Error, e.what()};
-            }
-            if (!scan.empty()) {
-                scan_accepted = true;
-                break;
-            }
+        const std::optional<common_types::DroneStepResult> scan_error =
+            dispatchScanAndApplyToMap(*scan_orientation, post_move_pos, post_move_heading);
+        if (scan_error.has_value()) {
+            return *scan_error;
         }
-        if (!scan_accepted) {
-            throw std::runtime_error(
-                "DroneControlImpl::step: the LiDAR returned an empty scan " +
-                std::to_string(kMaxLidarScanAttempts) + " times in a row");
-        }
-
-        // A thrown exception from applyToMap (e.g. underlying map access/atVoxel/set failing) is
-        // likewise reported as Error rather than escaping step(): step_index_ is not incremented,
-        // and the new scan is never assigned to latest_scan_ unless applyToMap actually completed
-        // -- no attempt is made to roll back any partial map writes applyToMap may have already
-        // performed before throwing.
-        try {
-            ScanResultToVoxels::applyToMap(
-                output_map_, post_move_pos, post_move_heading, scan, lidar_.config());
-        } catch (const std::exception& e) {
-            return common_types::DroneStepResult{
-                common_types::DroneStepStatus::Error, e.what()};
-        }
-        latest_scan_ = scan;
     } else {
         latest_scan_ = std::nullopt;
     }
@@ -637,7 +544,7 @@ common_types::DroneStepResult DroneControlImpl::step() {
         case common_types::AlgorithmStatus::FinishedWithUnmappableVoxels:
             return common_types::DroneStepResult{
                 common_types::DroneStepStatus::Completed,
-                "mapping finished with unmappable voxels remaining"};
+                kUnmappableVoxelsMessage};
     }
 
     return common_types::DroneStepResult{

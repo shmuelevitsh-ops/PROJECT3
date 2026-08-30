@@ -6,12 +6,7 @@
 
 namespace simulator {
 
-// Carries a stable, machine-readable error code
-// alongside the human-readable message, so SimulationManager can
-// populate common::types::ErrorRef without parsing exception text.
-//
-// Derives from std::invalid_argument so it can still be caught wherever
-// std::invalid_argument is expected.
+// invalid_argument with an additional machine-readable error code.
 class SimulationException : public std::invalid_argument {
 public:
     SimulationException(std::string code, const std::string& message)

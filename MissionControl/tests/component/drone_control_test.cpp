@@ -176,7 +176,7 @@ protected:
     NiceMock<test::GMockIMappingAlgorithm> algorithm_{
         MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), output_map_}};
     DroneControlImpl control_{
-        droneConfig(), missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        droneConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
 
     void SetUp() override {
         ON_CALL(output_map_, getMapConfig()).WillByDefault(Return(unboundedMapConfig()));
@@ -531,7 +531,7 @@ TEST_F(DroneControl, ScanResultAppliedAtPostMovementPositionNotPreMovement) {
     // (a clean, easy-to-read distance), and this test has nothing to do with oversized-command
     // splitting -- it must not become one.
     DroneControlImpl unsplit_control{
-        unsplittableDroneConfig(), missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        unsplittableDroneConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
 
     MappingStepCommand command;
     command.movement = advanceCommand(100.0 * isq::length[cm]);
@@ -757,7 +757,7 @@ TEST_F(DroneControl, ElevateCrossingUpperBoundIsShortened) {
     // to what this test means to exercise (pure OOB shortening magnitude, not row-8 splitting) --
     // uses a local DroneControlImpl with unsplittableDroneConfig() to isolate that.
     DroneControlImpl unsplit_control{
-        unsplittableDroneConfig(), missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        unsplittableDroneConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
 
     // Post-movement GPS (row 12) must report the actual dispatched -- nudged a hair below the
     // exclusive 50cm upper bound, and therefore genuinely in-bounds -- position, not the boundary
@@ -792,7 +792,7 @@ TEST_F(DroneControl, NegativeElevateCrossingLowerBoundIsShortened) {
     // unsplittableDroneConfig() isolation as ElevateCrossingUpperBoundIsShortened above (50cm
     // legal distance exceeds the ordinary 40cm max_elevate).
     DroneControlImpl unsplit_control{
-        unsplittableDroneConfig(), missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        unsplittableDroneConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
 
     // Post-movement GPS (row 12) must agree with the descent landing exactly at z=0.
     EXPECT_CALL(gps_, position())
@@ -855,7 +855,7 @@ TEST_F(DroneControl, AdvanceParallelToUpperBoundIsNotShortenedByHeadingFloatingP
     // (row 8). Without this isolation, this test would silently become a row-8 splitting test
     // instead of the OOB floating-point regression it is meant to be.
     DroneControlImpl unsplit_control{
-        unsplittableDroneConfig(), missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        unsplittableDroneConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
 
     const auto x_near_bound = 30.0 * x_extent[cm] - 1.0e-9 * x_extent[cm];
     // Post-movement GPS (row 12) must agree with a pure +y advance of 5e7cm: x unchanged (the
@@ -1233,7 +1233,7 @@ TEST_F(DroneControl, AdvanceSplitByDecimalMaxProducesExactChunkCountNoPhantomTra
     DroneConfigData decimal_max_config = droneConfig();
     decimal_max_config.max_advance = 0.1 * isq::length[cm];
     DroneControlImpl decimal_control{
-        decimal_max_config, missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        decimal_max_config, lidar_, gps_, movement_, output_map_, algorithm_};
 
     // Post-movement GPS (row 12) must agree with the cumulative x after each of the 10 chunks;
     // row 12's numerical tolerance absorbs the sub-ULP residue splitMagnitude()'s own repeated
@@ -1278,7 +1278,7 @@ TEST_F(DroneControl, LargeMaxWithSmallGenuineRemainderIsNotDroppedAsResidue) {
     DroneConfigData large_max_config = droneConfig();
     large_max_config.max_advance = 1.0e9 * isq::length[cm];
     DroneControlImpl large_max_control{
-        large_max_config, missionConfig(), lidar_, gps_, movement_, output_map_, algorithm_};
+        large_max_config, lidar_, gps_, movement_, output_map_, algorithm_};
 
     // The movement below (~1e9cm) is far beyond the fixture's default unboundedMapConfig()
     // (+-100000cm); widen the map bounds here so it stays legal and the OOB amendment leaves it

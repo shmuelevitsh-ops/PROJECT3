@@ -2,7 +2,6 @@
 
 #include <mp-units/systems/si/math.h>
 
-#include <algorithm>
 #include <limits>
 
 namespace simulator {
@@ -24,6 +23,9 @@ using common::y_extent;
 using common::z_extent;
 
 namespace {
+
+// Beam-marching step as a fraction of map resolution.
+constexpr double kBeamSampleStepFraction = 0.1;
 
 [[nodiscard]] std::size_t beams_on_circle(std::size_t circle_index) {
     std::size_t count = 1;
@@ -101,8 +103,7 @@ PhysicalLength MockLidar::traceBeam(const Orientation& beam_orientation) const {
     const auto dy = cos_altitude * si::sin(beam_orientation.horizontal);
     const auto dz = si::sin(beam_orientation.altitude);
 
-    // step based on size of the map's resolution
-    const PhysicalLength step = 0.1 * map_.getMapConfig().resolution;
+    const PhysicalLength step = kBeamSampleStepFraction * map_.getMapConfig().resolution;
 
     for (PhysicalLength distance = 0.0 * cm; distance <= config_.z_max; distance += step) {
         // Computing target voxel position

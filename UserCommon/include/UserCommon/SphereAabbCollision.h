@@ -1,11 +1,6 @@
 #pragma once
 
-// Pure sphere-vs-axis-aligned-bounding-box geometry, shared between Algorithm's own safety
-// checks (MappingAlgorithmImpl.cpp) and Simulator's MockMovement collision detection so both
-// apply the identical closest-point-on-AABB test. Header-only, no map access, no
-// VoxelOccupancy policy, no runtime (.so) dependency: including this file does not stop
-// Algorithm.so (or MissionControl.so, if it ever uses this) from being built and used
-// independently.
+// Shared sphere-vs-AABB collision geometry.
 
 #include <Common/Units.h>
 
@@ -13,11 +8,7 @@
 
 namespace user_common_322889890_315113738 {
 
-// True if a sphere of `radius` centered at `center` intersects (including merely touching) the
-// axis-aligned box spanning [box_min, box_max] on every axis. Uses the closest point on the box
-// to `center`, not the box's own center -- so a box is correctly reported as intersecting even
-// when its center lies farther from `center` than `radius`, as long as a corner/edge/face is
-// still within reach.
+// Returns true when the sphere intersects or touches the axis-aligned box.
 [[nodiscard]] inline bool sphereIntersectsAxisAlignedBox(
     const common::Position3D& center,
     common::PhysicalLength radius,

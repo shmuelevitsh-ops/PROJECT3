@@ -1,6 +1,3 @@
-// TO DO: Following a forum clarification, failed_mission_controls/failed_algorithms contains only components
-// that could not be loaded or run at all.
-
 #pragma once
 
 #include <Simulator/ConfigLoader.h>       // CompositionFilePaths, ReferencedConfigFile

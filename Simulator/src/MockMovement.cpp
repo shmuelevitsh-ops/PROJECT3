@@ -23,11 +23,13 @@ using common::z_extent;
 
 namespace {
 
+// Fraction of one voxel's resolution used as the step size when sampling a movement path for
+// collision detection (in addition to the exact destination, which is always checked separately).
+constexpr double kPathSampleStepFraction = 0.1;
+
 [[nodiscard]] double numCm(PhysicalLength v) { return v.force_numerical_value_in(cm); }
 
-// True if a drone sphere of `radius`, centered at `center`, overlaps any Occupied voxel of
-// `map`. Only VoxelOccupancy::Occupied is a real physical wall here -- OutOfBounds,
-// Unmapped, PotentiallyOccupied and Empty are all non-blocking for this check.
+// Checks whether the drone sphere intersects an Occupied voxel.
 [[nodiscard]] bool sphereHitsWall(const IMap3D& map, const Position3D& center, PhysicalLength radius) {
     const types::MapConfig config = map.getMapConfig();
     const double resolution_cm = numCm(config.resolution);
@@ -40,14 +42,8 @@ namespace {
     const double cy = (center.y + config.offset.y).force_numerical_value_in(cm);
     const double cz = (center.z + config.offset.z).force_numerical_value_in(cm);
 
-    // The lower bound uses ceil(...)-1 rather than floor(...): when (center - radius) lands
-    // exactly on a resolution boundary, floor() rounds up to the voxel that starts there and
-    // skips the voxel immediately below it -- even though the sphere's surface touches that
-    // lower voxel's far face exactly, which sphereIntersectsAxisAlignedBox's closed (<=)
-    // comparison below defines as intersecting. ceil(x)-1 equals floor(x) when x is not exactly
-    // on a boundary, and steps one voxel lower when it is. The upper bound has no equivalent gap:
-    // floor((center + radius) / resolution) already lands on the voxel whose *near* face touches
-    // the sphere's surface at an exact boundary.
+    // ceil(...)-1 includes the lower voxel when the sphere exactly touches
+// a voxel boundary; the upper bound is already handled correctly by floor().
     const long ix_min = static_cast<long>(std::ceil((cx - radius_cm) / resolution_cm)) - 1;
     const long ix_max = static_cast<long>(std::floor((cx + radius_cm) / resolution_cm));
     const long iy_min = static_cast<long>(std::ceil((cy - radius_cm) / resolution_cm)) - 1;
@@ -86,9 +82,7 @@ namespace {
     return false;
 }
 
-// Samples the straight-line path from `start` to `destination` every 0.1*resolution, plus the
-// exact destination itself, and reports whether the drone sphere collides with a real wall
-// anywhere along it.
+// Samples the movement path and checks the exact destination for collisions.
 [[nodiscard]] bool pathCollides(const IMap3D& map, const Position3D& start, const Position3D& destination,
                                  PhysicalLength radius) {
     const double resolution_cm = numCm(map.getMapConfig().resolution);
@@ -98,7 +92,7 @@ namespace {
     const double total_distance_cm = std::sqrt(dx * dx + dy * dy + dz * dz);
 
     if (resolution_cm > 0.0 && total_distance_cm > 0.0) {
-        const double step_cm = 0.1 * resolution_cm;
+        const double step_cm = kPathSampleStepFraction * resolution_cm;
         const long num_steps = static_cast<long>(std::floor(total_distance_cm / step_cm));
         for (long i = 0; i <= num_steps; ++i) {
             const double t = (static_cast<double>(i) * step_cm) / total_distance_cm;
@@ -141,11 +135,7 @@ types::MovementResult MockMovement::advance(PhysicalLength distance) {
     const Position3D current_pos = gps_.position();
     const HorizontalAngle heading = gps_.heading().horizontal;
 
-    // Shared with MissionControl's DroneControlImpl (which predicts this same destination for
-    // Optional Common-Issues rows 10/12): using the same direction math here as it uses for its
-    // own prediction means the two can never disagree purely from computing cos/sin differently
-    // -- e.g. one side keeping a ~1e-17 floating-point residue at an axis-aligned heading that the
-    // other rounds away.
+    // Uses the same Advance direction calculation as DroneControlImpl.
     const user_common_322889890_315113738::AdvanceDirection direction =
         user_common_322889890_315113738::advanceDirection(heading);
     const double distance_cm =
