@@ -38,5 +38,13 @@ Thumbs.db
 # Logs
 *.log
 
-# Generated simulation files
-simulation_output.yaml
+# Generated simulation/test output (any location, matched by directory or file name
+# rather than hardcoded per-run paths, since these are timestamped and regenerated
+# on every test run)
+simulation_output*.yaml
+**/test_output/
+**/audit_output/
+manual_e2e_runtime/
+map_output.npy
+comparative_report.yaml
+competitive_report.yaml

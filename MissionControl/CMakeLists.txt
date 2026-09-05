@@ -13,6 +13,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
     project(MissionControl LANGUAGES CXX)
 
+    # Default to an optimized build when configured standalone without an
+    # explicit build type (mirrors the root CMakeLists.txt default).
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+    endif()
+
     set(CMAKE_CXX_STANDARD 20)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
