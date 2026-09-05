@@ -1,0 +1,147 @@
+Assignment 3 - Bonus: Optional Common Issues
+Shirel Adler - 322889890
+Adi Shmuelevitsh - 315113738
+
+We implemented all Optional scenarios listed in "Common issues and handling".
+
+The main implementation is in:
+- MissionControl/src/DroneControlImpl.cpp
+- MissionControl/src/MissionControlImpl.cpp
+- Simulator/src/SimulationRunImpl.cpp
+
+
+1. Faulty algorithm movement would result in getting out of bounds
+   Handling:
+   DroneControl checks the requested position-changing movement against the map bounds.
+   If no legal non-zero part of the requested movement can be executed, the movement is
+   ignored and is not passed to IDroneMovement. The rest of the step, such as a requested
+   scan, may still continue.
+
+   Relevant implementation:
+   DroneControlImpl::prepareNextSequence()
+   legalMovementFraction()
+
+
+2. Faulty algorithm returned a command with invalid values
+   Handling:
+   Active numeric movement/scan fields are validated. Non-finite values are rejected.
+   DroneControl retries the Algorithm command, using a maximum of 3 attempts. If no valid
+   command is received, std::runtime_error is thrown.
+
+   Relevant implementation:
+   isMovementCommandValid()
+   isScanOrientationValid()
+   isAlgorithmCommandValid()
+   DroneControlImpl::prepareNextSequence()
+
+
+
+3. Faulty algorithm returns an empty movement and scan command ("NOOP")
+   Handling:
+   A Working command containing neither a movement nor a scan is treated as a faulty NOOP.
+   DroneControl retries the Algorithm, with a maximum of 3 attempts. After exhausting the
+   attempts, std::runtime_error is thrown. Legitimate terminal commands with no movement or
+   scan are not treated as faulty NOOPs.
+
+   Relevant implementation:
+   isFaultyNoop()
+   DroneControlImpl::prepareNextSequence()
+
+
+
+4. LiDAR returns an empty vector
+   Handling:
+   DroneControl retries only the LiDAR scan, without re-dispatching the movement or
+   re-requesting a command from the Algorithm. Up to 3 scan attempts are made. If all
+   attempts return an empty scan, std::runtime_error is thrown.
+
+   Relevant implementation:
+   DroneControlImpl::dispatchScanAndApplyToMap()
+
+
+
+5. Movement driver returns false
+   Handling:
+   DroneControl retries the exact same already-prepared movement chunk. Up to 3 driver
+   attempts are made. If all attempts fail, std::runtime_error is thrown. The Algorithm is
+   not re-consulted during these retries.
+
+   Relevant implementation:
+   DroneControlImpl::dispatchMovementAndValidateGps()
+
+
+
+6. Algorithm returned a movement bigger than the maximum allowed
+   Handling:
+   Oversized Rotate, Advance and Elevate commands are split into legal-sized chunks according
+   to the drone configuration. Each chunk is executed as a separate step, while the original
+   Algorithm command is kept pending and the Algorithm is not called again until all chunks
+   are dispatched.
+
+   Relevant implementation:
+   splitMagnitude()
+   splitMovement()
+   DroneControlImpl::prepareNextSequence()
+   DroneControlImpl::step()
+
+
+
+7. Drone returned an "Error" status on a step
+   Handling:
+   MissionControl records/logs DroneStepStatus::Error and continues running the mission
+   instead of terminating it. A later successful/Completed step can still complete the mission.
+
+   Relevant implementation:
+   MissionControlImpl::runMission()
+
+
+
+8. Algorithm returned a movement that would take the drone out of the mission bounds
+   Handling:
+   For a position-changing movement that partially crosses the bounds, DroneControl computes
+   the largest legal fraction and shortens the movement so that the dispatched destination
+   remains in bounds. This amendment is applied before oversized-command splitting.
+
+   Relevant implementation:
+   movementDelta()
+   legalMovementFraction()
+   DroneControlImpl::prepareNextSequence()
+
+
+
+9. GPS returns out-of-bound coordinates
+   Handling:
+   DroneControl compares the bad GPS reading with its internal position baseline.
+   If the internal position is still in bounds, the GPS sample is treated as spurious and
+   ignored. If the internal position is also out of bounds (or no valid baseline exists yet),
+   std::runtime_error is thrown.
+
+   Relevant implementation:
+   DroneControlImpl::handlePreStepGps()
+
+
+
+10. Movement executed but GPS updated with impossible coordinates
+    Handling:
+    After a successful movement, DroneControl computes the physically expected position and
+    validates a fresh GPS reading against it. If the reading is inconsistent, GPS is retried
+    up to 3 additional times. If no valid reading is obtained, the step returns
+    DroneStepStatus::Error and the pending movement sequence is discarded.
+
+    Relevant implementation:
+    expectedPositionAfterMovement()
+    DroneControlImpl::validatePostMovementGps()
+    DroneControlImpl::dispatchMovementAndValidateGps()
+
+
+
+Run-level propagation
+---------------------
+Retry exhaustion exceptions from DroneControl are caught by MissionControl and converted into
+a MissionRunStatus::Error. SimulationRunImpl then treats an Error mission as a failed run and
+assigns the error score, rather than performing the normal map comparison.
+
+Relevant implementation:
+MissionControlImpl::runMission()
+SimulationRunImpl::run()
+
