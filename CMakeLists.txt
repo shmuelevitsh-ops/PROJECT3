@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
 project(assignment_3 LANGUAGES CXX)
 
+# Default to an optimized build when the invoker (e.g. a preset or the grading
+# scripts) doesn't request a build type explicitly, so `cmake --preset default`
+# produces a fast Release binary without anyone needing to pass extra flags.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
