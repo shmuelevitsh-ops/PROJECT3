@@ -676,9 +676,14 @@ TEST(MappingAlgorithm, SphereSafetyRejectsEmptyCandidateWithPotentiallyOccupiedN
 // *center* lies beyond the radius but whose *volume* still clips the sphere); the second is
 // purely about which position the sphere is centered at (the real drone is not always exactly at
 // its own voxel's center). Both use a fully-Empty grid (via fillAllEmptyIn) with exactly one
-// Occupied voxel, so with the fix the algorithm should refuse the only candidate move, find
-// nothing left to map, and finish immediately with no movement at all -- with either original bug
-// still present, it issues an Advance into the unsafe candidate instead.
+// Occupied voxel adjacent to the Local Sweep's first (X-lane) candidate -- with either original
+// bug still present, that first candidate would be wrongly accepted and the algorithm would
+// advance straight into it. With the bug fixed, that one candidate is rejected, but the Local
+// Sweep may still turn toward another safe direction (Y/Z) rather than immediately handing off to
+// Frontier (that immediate hand-off was specific to the old global-cursor implementation), so
+// these drive the mission to completion via runUntilDoneVerifyingPathSafety() -- which already
+// fails the test if the unsafe candidate (or anything else) is ever unsafely entered -- and just
+// check that the reachable, safe remainder of the grid still gets fully mapped.
 
 TEST(MappingAlgorithm, SphereVsAabbRejectsDiagonalCornerVoxelBeyondOldCenterDistanceCheck) {
     // radius=8cm, resolution=10cm: the diagonal (+x,+y) neighbor of the candidate (3,2,2) sits at
@@ -697,14 +702,12 @@ TEST(MappingAlgorithm, SphereVsAabbRejectsDiagonalCornerVoxelBeyondOldCenterDist
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 50.0), drone, *map});
     const DroneState state{vc(2, 2, 2), Orientation{}, 0};
 
-    const MappingStepCommand command = algorithm.nextStep(state, nullptr);
+    const AlgorithmStatus status = runUntilDoneVerifyingPathSafety(algorithm, state, *map, /*radius_cm=*/8.0, 500);
 
-    EXPECT_FALSE(command.movement.has_value())
-        << "the only candidate move's safety sphere clips the diagonal Occupied voxel's corner "
-           "and must be rejected, even though that voxel's center lies beyond the drone's radius";
-    EXPECT_EQ(command.status, AlgorithmStatus::Finished)
-        << "with the unsafe candidate correctly rejected and nothing else left to map, the "
-           "algorithm should finish immediately instead of moving into it";
+    EXPECT_EQ(status, AlgorithmStatus::Finished)
+        << "the diagonal Occupied voxel is the only non-Empty cell in the grid; once the rest has "
+           "been safely swept the mission must finish -- and runUntilDoneVerifyingPathSafety above "
+           "already fails this test if the unsafe candidate's corner is ever actually clipped";
 }
 
 TEST(MappingAlgorithm, SafetyCheckPreservesRealIntraVoxelOffsetInsteadOfAssumingVoxelCenter) {
@@ -726,14 +729,13 @@ TEST(MappingAlgorithm, SafetyCheckPreservesRealIntraVoxelOffsetInsteadOfAssuming
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 50.0), drone, *map});
     const DroneState state{pos(28.0, 25.0, 25.0), Orientation{}, 0}; // 3cm off voxel (2,2,2)'s center in x
 
-    const MappingStepCommand command = algorithm.nextStep(state, nullptr);
+    const AlgorithmStatus status = runUntilDoneVerifyingPathSafety(algorithm, state, *map, /*radius_cm=*/4.0, 500);
 
-    EXPECT_FALSE(command.movement.has_value())
-        << "the candidate move's true future position (offset-preserved) collides with the "
-           "Occupied voxel, even though the naive (un-offset) voxel center would not";
-    EXPECT_EQ(command.status, AlgorithmStatus::Finished)
-        << "with the unsafe candidate correctly rejected and nothing else left to map, the "
-           "algorithm should finish immediately instead of moving into it";
+    EXPECT_EQ(status, AlgorithmStatus::Finished)
+        << "the Occupied voxel is the only non-Empty cell in the grid; once the rest has been "
+           "safely swept the mission must finish -- and runUntilDoneVerifyingPathSafety above "
+           "already fails this test if the true, offset-preserved future position is ever unsafely "
+           "advanced into";
 }
 
 // --- Movement path safety across multiple steps -------------------------------------------------
@@ -1171,6 +1173,114 @@ TEST(MappingAlgorithm, PotentiallyOccupiedVoxelOnLineOfSightDoesNotBlockTargetin
            "+x is walled off and z has no extent)";
     EXPECT_TRUE(command.scan_orientation.has_value())
         << "expected a scan command targeting the cell beyond the PotentiallyOccupied voxel";
+}
+
+// --- Local Sweep turns locally instead of detouring into generic Frontier ----------------------
+
+TEST(MappingAlgorithm, LocalSweepTurnsToTheNextYLaneInsteadOfDetouringToFrontierWhenTheXLaneIsBlocked) {
+    // Regression for the redesign's core requirement: a blocked Sweep candidate must trigger the
+    // local lawnmower turn (Y then Z), never a fall-through into a generic Frontier search for
+    // some unrelated reachable target elsewhere on the map -- even when such a target exists and
+    // would be trivially reachable by a naive BFS-based detour. The old cursor-based
+    // implementation would, on this exact setup, advance its virtual cursor past the blocked
+    // candidate and hand off to frontierStep() from the drone's actual position -- which would
+    // most likely return a scan of some other reachable Unmapped voxel, not a movement into the
+    // local Y-turn destination.
+    constexpr double kResolutionCm = 10.0;
+    constexpr long kXCells = 5;
+    constexpr long kYCells = 3;
+    const MapConfig config{
+        MappingBounds{0.0 * x_extent[cm], static_cast<double>(kXCells) * kResolutionCm * x_extent[cm],
+                      0.0 * y_extent[cm], static_cast<double>(kYCells) * kResolutionCm * y_extent[cm],
+                      0.0 * z_extent[cm], kResolutionCm * z_extent[cm]},
+        Position3D{}, kResolutionCm * isq::length[cm]};
+    auto map = freshMap(config);
+    const auto vc = [&](long ix, long iy) { return voxelCenterIn(config, ix, iy, 0); };
+    map->set(vc(1, 0), VoxelOccupancy::Occupied); // blocks the X lane immediately ahead.
+    map->set(vc(0, 1), VoxelOccupancy::Empty);    // the local Y-turn destination.
+    // Every other cell (including (4,0), far down the X lane, and all of row y=2) stays Unmapped
+    // by default -- reachable via a naive BFS detour if a generic Frontier fall-through were
+    // attempted instead of the local turn.
+
+    const auto drone = customDroneConfig(/*radius_cm=*/1.0, /*max_rotate_deg=*/90.0,
+                                          /*max_advance_cm=*/50.0, /*max_elevate_cm=*/50.0);
+    MappingAlgorithmImpl algorithm(
+        MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
+    const DroneState state{vc(0, 0), Orientation{}, 0};
+
+    const MappingStepCommand command = algorithm.nextStep(state, nullptr);
+
+    ASSERT_TRUE(command.movement.has_value())
+        << "the local Y-turn destination is already known Empty and safe; the algorithm must move "
+           "there directly instead of scanning some unrelated far-away Unmapped cell";
+    EXPECT_EQ(command.movement->type, MovementCommandType::Rotate)
+        << "the Y-turn destination is due +y, a 90deg turn away from the drone's initial +x "
+           "heading; a Rotate must precede the Advance into it";
+}
+
+// --- Frontier seeds the next Local Sweep from the newly discovered voxel -----------------------
+
+TEST(MappingAlgorithm, FrontierMovesIntoTheNewlyDiscoveredVoxelToSeedTheNextLocalSweep) {
+    // A 2x2x2 room: the whole z=0 layer is Empty, so Local Sweep covers it via ordinary lawnmower
+    // moves alone (never needing to scan anything itself) and then exhausts at (0,1,0), where the
+    // *specific* Z-layer-transition cell the lawnmower would try next, (0,0,1), is Occupied -- X
+    // and Y are also both out of range there, so this is a genuine Local Sweep exhaustion, not a
+    // one-candidate detour. That forces a real Frontier phase, which immediately finds (0,1,0)
+    // itself as a valid vantage point for the one remaining Unmapped voxel, (0,1,1), directly
+    // above it -- a single, unambiguous (frontier, target) pair, so unlike a bearing-matching
+    // heuristic this setup can detect the *first* scan_orientation the algorithm ever issues and
+    // know for certain it is this Frontier scan, not some earlier incidental Local Sweep one. Per
+    // the redesign, once that scan resolves the target to new, safe, reachable free space, the
+    // algorithm must physically move the drone into that exact voxel to seed the next Local Sweep
+    // -- not merely mark it mapped while leaving the drone parked at the old frontier vantage
+    // point, which is the precise logical-Sweep/physical-drone disconnect the redesign exists to
+    // remove.
+    constexpr long kVoxelsPerAxis = 2;
+    const auto config = customGridConfig(kVoxelsPerAxis, 10.0);
+    auto map = freshMap(config);
+    fillAllEmptyIn(*map, config, kVoxelsPerAxis);
+    const auto vc = [&](long ix, long iy, long iz) { return voxelCenterIn(config, ix, iy, iz); };
+    map->set(vc(0, 0, 1), VoxelOccupancy::Occupied); // blocks the standard Z-layer transition cell.
+    map->set(vc(1, 0, 1), VoxelOccupancy::Occupied);
+    map->set(vc(1, 1, 1), VoxelOccupancy::Occupied);
+    map->set(vc(0, 1, 1), VoxelOccupancy::Unmapped); // the only target, directly above (0,1,0).
+
+    const auto drone = customDroneConfig(/*radius_cm=*/1.0, /*max_rotate_deg=*/180.0,
+                                          /*max_advance_cm=*/50.0, /*max_elevate_cm=*/50.0);
+    MappingAlgorithmImpl algorithm(
+        MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 50.0), drone, *map});
+    DroneState state{vc(0, 0, 0), Orientation{}, 0};
+
+    MappingStepCommand command;
+    for (int i = 0; i < 20 && !command.scan_orientation.has_value(); ++i) {
+        command = algorithm.nextStep(state, nullptr);
+        ASSERT_EQ(command.status, AlgorithmStatus::Working)
+            << "Local Sweep must exhaust room A and hand off to Frontier well before this budget";
+        state = applyMovement(state, command.movement);
+        state.step_index += 1;
+    }
+    ASSERT_TRUE(command.scan_orientation.has_value())
+        << "expected Local Sweep to exhaust at (0,1,0) and Frontier to then scan the only "
+           "remaining target, (0,1,1), directly above it";
+
+    // Simulate what DroneControlImpl + ScanResultToVoxels would have done with that scan's real
+    // result: the target resolves to newly discovered, safe, reachable free space.
+    map->set(vc(0, 1, 1), VoxelOccupancy::Empty);
+
+    const MappingStepCommand after_resolution = algorithm.nextStep(state, nullptr);
+    ASSERT_TRUE(after_resolution.movement.has_value())
+        << "resolving the target to new, safe, reachable free space must make the algorithm move "
+           "into it to seed the next Local Sweep";
+    EXPECT_EQ(after_resolution.movement->type, MovementCommandType::Elevate)
+        << "the newly discovered voxel is directly above the drone's current position";
+    state = applyMovement(state, after_resolution.movement);
+
+    const TestVoxelIndex drone_idx = toIndexIn(config, state.position);
+    EXPECT_EQ(drone_idx.ix, 0);
+    EXPECT_EQ(drone_idx.iy, 1);
+    EXPECT_EQ(drone_idx.iz, 1)
+        << "the algorithm must have physically moved the drone into the newly discovered voxel "
+           "itself, not left it parked at the old frontier vantage point";
 }
 
 // --- Sweep boustrophedon direction alternation ------------------------------------------------

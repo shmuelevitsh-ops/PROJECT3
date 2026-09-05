@@ -196,7 +196,7 @@ protected:
     // everywhere -- never Occupied, so it never blocks the plain (non-collision) movement tests
     // below. Individual collision tests mark specific voxels Occupied via hidden_map_->set(...).
     std::unique_ptr<Map3DImpl> hidden_map_ = freshMap(gridConfig(20, 10.0));
-    MockGPS gps_{origin(), headingDeg(0.0, 0.0), 10.0 * isq::length[cm]};
+    MockGPS gps_{origin(), headingDeg(0.0, 0.0)};
     MockMovement movement_{gps_, *hidden_map_, droneConfig().radius};
 };
 

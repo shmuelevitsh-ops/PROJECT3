@@ -194,7 +194,6 @@ void writeSimulationOutput(const types::SimulationManagerReport& report, const C
     out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << report.generated_at_utc;
     out << YAML::Key << "metric" << YAML::Value << YAML::DoubleQuoted << report.metric;
 
-    blankLineBetweenMapKeys(out);
     out << YAML::Key << "score_range" << YAML::Value << YAML::BeginMap;
     out << YAML::Key << "min" << YAML::Value << std::get<0>(report.score_range);
     out << YAML::Key << "max" << YAML::Value << std::get<1>(report.score_range);
