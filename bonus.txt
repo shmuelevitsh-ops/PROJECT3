@@ -20,6 +20,7 @@ The main implementation is in:
    Relevant implementation:
    DroneControlImpl::prepareNextSequence()
    legalMovementFraction()
+   shortenMovementToBounds()
 
 
 2. Faulty algorithm returned a command with invalid values
@@ -33,6 +34,7 @@ The main implementation is in:
    isScanOrientationValid()
    isAlgorithmCommandValid()
    DroneControlImpl::prepareNextSequence()
+   fetchValidAlgorithmCommand()
 
 
 
@@ -46,6 +48,7 @@ The main implementation is in:
    Relevant implementation:
    isFaultyNoop()
    DroneControlImpl::prepareNextSequence()
+   fetchValidAlgorithmCommand()
 
 
 
@@ -68,6 +71,7 @@ The main implementation is in:
 
    Relevant implementation:
    DroneControlImpl::dispatchMovementAndValidateGps()
+   dispatchMovementWithRetries()
 
 
 
@@ -106,6 +110,7 @@ The main implementation is in:
    movementDelta()
    legalMovementFraction()
    DroneControlImpl::prepareNextSequence()
+   shortenMovementToBounds()
 
 
 

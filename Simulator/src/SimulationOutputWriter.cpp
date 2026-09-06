@@ -269,6 +269,37 @@ void emitFlowStringList(YAML::Emitter& out, const std::vector<std::string>& valu
     out << YAML::EndSeq;
 }
 
+// Opens the root/`<report_key>` map envelope and emits the composition_file / `second_key` /
+// generated_at_utc header fields -- identical between writeComparativeReport() and
+// writeCompetitiveReport() apart from the report key and the second field's name/value.
+void emitReportHeader(YAML::Emitter& out, const std::string& report_key,
+                      const std::filesystem::path& composition_file, const std::string& second_key,
+                      const std::string& second_value) {
+    out << YAML::BeginMap;
+    out << YAML::Key << report_key << YAML::Value << YAML::BeginMap;
+
+    out << YAML::Key << "composition_file" << YAML::Value << YAML::DoubleQuoted << composition_file.string();
+    out << YAML::Key << second_key << YAML::Value << YAML::DoubleQuoted << second_value;
+    out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << currentUtcTimestamp();
+}
+
+// The `errors` field: identical between writeComparativeReport() and writeCompetitiveReport().
+void emitErrorsSection(YAML::Emitter& out, const std::vector<std::string>& failed_components) {
+    blankLineBetweenMapKeys(out);
+    out << YAML::Key << "errors" << YAML::Value;
+    emitFlowStringList(out, failed_components);
+}
+
+// Closes the `<report_key>`/root map envelope opened by emitReportHeader() and writes the
+// finished document -- identical between writeComparativeReport() and writeCompetitiveReport().
+void emitReportFooterAndWrite(YAML::Emitter& out, const std::filesystem::path& output_yaml_path) {
+    out << YAML::EndMap; // report
+    out << YAML::EndMap; // root
+
+    std::ofstream file(output_yaml_path);
+    file << out.c_str() << "\n";
+}
+
 } // namespace
 
 void writeComparativeReport(const std::filesystem::path& composition_file,
@@ -277,13 +308,8 @@ void writeComparativeReport(const std::filesystem::path& composition_file,
                             const std::vector<std::string>& failed_mission_controls,
                             const std::filesystem::path& output_yaml_path) {
     YAML::Emitter out;
-    out << YAML::BeginMap;
-    out << YAML::Key << "comparative_report" << YAML::Value << YAML::BeginMap;
-
-    out << YAML::Key << "composition_file" << YAML::Value << YAML::DoubleQuoted << composition_file.string();
-    out << YAML::Key << "mission_control_folder" << YAML::Value << YAML::DoubleQuoted
-        << mission_control_folder.string();
-    out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << currentUtcTimestamp();
+    emitReportHeader(out, "comparative_report", composition_file, "mission_control_folder",
+                     mission_control_folder.string());
 
     blankLineBetweenMapKeys(out);
     out << YAML::Key << "results_summary" << YAML::Value << YAML::BeginSeq;
@@ -300,15 +326,8 @@ void writeComparativeReport(const std::filesystem::path& composition_file,
     }
     out << YAML::EndSeq;
 
-    blankLineBetweenMapKeys(out);
-    out << YAML::Key << "errors" << YAML::Value;
-    emitFlowStringList(out, failed_mission_controls);
-
-    out << YAML::EndMap; // comparative_report
-    out << YAML::EndMap; // root
-
-    std::ofstream file(output_yaml_path);
-    file << out.c_str() << "\n";
+    emitErrorsSection(out, failed_mission_controls);
+    emitReportFooterAndWrite(out, output_yaml_path);
 }
 
 void writeCompetitiveReport(const std::filesystem::path& composition_file,
@@ -323,12 +342,8 @@ void writeCompetitiveReport(const std::filesystem::path& composition_file,
     });
 
     YAML::Emitter out;
-    out << YAML::BeginMap;
-    out << YAML::Key << "competitive_report" << YAML::Value << YAML::BeginMap;
-
-    out << YAML::Key << "composition_file" << YAML::Value << YAML::DoubleQuoted << composition_file.string();
-    out << YAML::Key << "mission_control" << YAML::Value << YAML::DoubleQuoted << mission_control.filename().string();
-    out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << currentUtcTimestamp();
+    emitReportHeader(out, "competitive_report", composition_file, "mission_control",
+                     mission_control.filename().string());
 
     blankLineBetweenMapKeys(out);
     out << YAML::Key << "results_summary" << YAML::Value << YAML::BeginSeq;
@@ -341,15 +356,8 @@ void writeCompetitiveReport(const std::filesystem::path& composition_file,
     }
     out << YAML::EndSeq;
 
-    blankLineBetweenMapKeys(out);
-    out << YAML::Key << "errors" << YAML::Value;
-    emitFlowStringList(out, failed_algorithms);
-
-    out << YAML::EndMap; // competitive_report
-    out << YAML::EndMap; // root
-
-    std::ofstream file(output_yaml_path);
-    file << out.c_str() << "\n";
+    emitErrorsSection(out, failed_algorithms);
+    emitReportFooterAndWrite(out, output_yaml_path);
 }
 
 } // namespace simulator

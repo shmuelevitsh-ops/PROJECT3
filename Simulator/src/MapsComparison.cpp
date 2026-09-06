@@ -24,6 +24,9 @@ namespace {
 // Partial credit for uncertainty next to a definite obstacle.
 constexpr double kPotentiallyOccupiedPartialCredit = 0.5;
 
+// Scales the [0, 1] match fraction into the [0, 100] score range.
+constexpr double kPercentageScale = 100.0;
+
 // Number of sample points covering [0, span_cm) at the given step size.
 [[nodiscard]] long sampleCount(double span_cm, double step_cm) {
     if (span_cm <= 0.0 || step_cm <= 0.0) {
@@ -196,14 +199,14 @@ struct VoxelScore {
         return 0.0;
     }
 
-    return (matches / static_cast<double>(total_compared)) * 100.0;
+    return (matches / static_cast<double>(total_compared)) * kPercentageScale;
 }
 
 } // namespace
 
 std::vector<double> MapsComparison::compare(
     const IMap3D& origin,
-    const std::vector<IMap3D*> targets) {
+    const std::vector<IMap3D*>& targets) {
 
     std::vector<double> scores;
     scores.reserve(targets.size());

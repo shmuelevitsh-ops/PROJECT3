@@ -21,6 +21,9 @@ using common::z_extent;
 
 namespace {
 
+// Fraction of one voxel's resolution used as the step size when sampling a beam for map updates.
+constexpr double kBeamSampleStepFraction = 0.1;
+
 [[nodiscard]] bool isZeroDistance(PhysicalLength distance) {
     return distance == 0.0 * cm;
 }
@@ -118,6 +121,59 @@ void markBeamSegment(IMutableMap3D& output_map,
     }
 }
 
+void applyHitToMap(IMutableMap3D& output_map,
+                   const Position3D& scan_origin,
+                   const Orientation& drone_heading,
+                   const common_types::LidarHit& hit,
+                   const common_types::LidarConfigData& lidar_config,
+                   PhysicalLength step) {
+    const Orientation beam_orientation =
+        absoluteBeamOrientation(drone_heading, hit.angle);
+
+    if (isZeroDistance(hit.distance)) {
+        markBeamSegment(
+            output_map,
+            scan_origin,
+            beam_orientation,
+            0.0 * cm,
+            lidar_config.z_min,
+            step,
+            common_types::VoxelOccupancy::PotentiallyOccupied);
+        return;
+    }
+
+    if (isMissDistance(hit.distance)) {
+        markBeamSegment(
+            output_map,
+            scan_origin,
+            beam_orientation,
+            0.0 * cm,
+            lidar_config.z_max,
+            step,
+            common_types::VoxelOccupancy::Empty);
+        return;
+    }
+
+    if (hit.distance > 0.0 * cm) {
+        markBeamSegment(
+            output_map,
+            scan_origin,
+            beam_orientation,
+            0.0 * cm,
+            hit.distance,
+            step,
+            common_types::VoxelOccupancy::Empty);
+
+        setIfStronger(
+            output_map,
+            pointAlongBeam(
+                scan_origin,
+                beam_orientation,
+                hit.distance),
+            common_types::VoxelOccupancy::Occupied);
+    }
+}
+
 } // namespace
 
 void ScanResultToVoxels::applyToMap(
@@ -132,58 +188,14 @@ void ScanResultToVoxels::applyToMap(
     }
 
     const PhysicalLength step =
-        0.1 * output_map.getMapConfig().resolution;
+        kBeamSampleStepFraction * output_map.getMapConfig().resolution;
 
     if (step <= 0.0 * cm) {
         return;
     }
 
     for (const common_types::LidarHit& hit : scan) {
-        const Orientation beam_orientation =
-            absoluteBeamOrientation(drone_heading, hit.angle);
-
-        if (isZeroDistance(hit.distance)) {
-            markBeamSegment(
-                output_map,
-                scan_origin,
-                beam_orientation,
-                0.0 * cm,
-                lidar_config.z_min,
-                step,
-                common_types::VoxelOccupancy::PotentiallyOccupied);
-            continue;
-        }
-
-        if (isMissDistance(hit.distance)) {
-            markBeamSegment(
-                output_map,
-                scan_origin,
-                beam_orientation,
-                0.0 * cm,
-                lidar_config.z_max,
-                step,
-                common_types::VoxelOccupancy::Empty);
-            continue;
-        }
-
-        if (hit.distance > 0.0 * cm) {
-            markBeamSegment(
-                output_map,
-                scan_origin,
-                beam_orientation,
-                0.0 * cm,
-                hit.distance,
-                step,
-                common_types::VoxelOccupancy::Empty);
-
-            setIfStronger(
-                output_map,
-                pointAlongBeam(
-                    scan_origin,
-                    beam_orientation,
-                    hit.distance),
-                common_types::VoxelOccupancy::Occupied);
-        }
+        applyHitToMap(output_map, scan_origin, drone_heading, hit, lidar_config, step);
     }
 }
 

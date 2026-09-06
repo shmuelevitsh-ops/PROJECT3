@@ -102,7 +102,7 @@ own code that is shared by more than one project.
 Each run creates a fresh, uniquely-named results directory directly under
 the provided `mission_control_folder` (comparative) or `algorithms_folder`
 (competition) - `comparative_results_<timestamp>` /
-`competition_<timestamp>` - suffixed with `_2`, `_3`, ... on collision. It
+`competition_<timestamp>` - suffixed with `2`, `3`, ... on collision. It
 contains:
 
 - `error.log` - all error output produced during the run.

@@ -62,6 +62,27 @@ void saveOutputMap(const common::IMutableMap3D& output_map, const std::filesyste
     }
 }
 
+// Records a drone-control exception as the mission's terminal error.
+void handleStepException(const std::exception& e, StepLoopOutcome& outcome, std::ofstream& verbose_log) {
+    std::cerr << "MissionControlImpl::runMission: drone control exception: " << e.what() << '\n';
+    outcome.errors.push_back(common_types::ErrorRef{"DRONE_CONTROL_EXCEPTION", e.what()});
+    outcome.status = common_types::MissionRunStatus::Error;
+    outcome.completion_message = e.what();
+    if (verbose_log.is_open()) {
+        verbose_log << "step " << (outcome.steps + 1) << ": drone control exception: " << e.what() << '\n';
+    }
+}
+
+// Records mission completion, including UNMAPPABLE_VOXELS_REMAINING if that was the reason.
+void handleStepCompleted(const common_types::DroneStepResult& result, StepLoopOutcome& outcome) {
+    outcome.status = common_types::MissionRunStatus::Completed;
+    outcome.completion_message = result.message;
+    if (result.message == DroneControlImpl::kUnmappableVoxelsMessage) {
+        std::cerr << "MissionControlImpl::runMission: " << result.message << '\n';
+        outcome.errors.push_back(common_types::ErrorRef{"UNMAPPABLE_VOXELS_REMAINING", result.message});
+    }
+}
+
 // Writes the final mission-finished summary line, iff `verbose_log` is open.
 void writeVerboseSummary(std::ofstream& verbose_log, common_types::MissionRunStatus status,
                          std::size_t steps, std::size_t error_count,
@@ -93,41 +114,21 @@ MissionControlImpl::MissionControlImpl(common::MissionControlDependencies depend
       output_map_file_(std::move(dependencies.output_map_file)),
       verbose_(dependencies.verbose) {}
 
-common_types::MissionRunResult MissionControlImpl::runMission() {
-    std::vector<common_types::ErrorRef> errors;
-    common_types::MissionRunStatus status = common_types::MissionRunStatus::MaxSteps;
-    std::size_t steps = 0;
-    std::string completion_message;
-
-    // Opened only when -verbose is set; every write below is guarded by is_open(), so this stays
-    // a no-op (no file created, nothing written) otherwise.
-    std::ofstream verbose_log = openVerboseLog(verbose_, output_map_file_, mission_.max_steps);
-
-    while (steps < mission_.max_steps) {
+void MissionControlImpl::runStepLoop(StepLoopOutcome& outcome, std::ofstream& verbose_log) {
+    while (outcome.steps < mission_.max_steps) {
         common_types::DroneStepResult result;
 
         try {
             result = drone_control_->step();
         } catch (const std::exception& e) {
-            std::cerr << "MissionControlImpl::runMission: drone control exception: "
-                    << e.what() << '\n';
-
-            errors.push_back(
-                common_types::ErrorRef{"DRONE_CONTROL_EXCEPTION", e.what()});
-
-            status = common_types::MissionRunStatus::Error;
-            completion_message = e.what();
-            if (verbose_log.is_open()) {
-                verbose_log << "step " << (steps + 1) << ": drone control exception: "
-                            << e.what() << '\n';
-            }
+            handleStepException(e, outcome, verbose_log);
             break;
         }
 
-        ++steps;
+        ++outcome.steps;
 
         if (verbose_log.is_open()) {
-            verbose_log << "step " << steps << ": " << drone_control_->lastStepLog() << '\n';
+            verbose_log << "step " << outcome.steps << ": " << drone_control_->lastStepLog() << '\n';
         }
 
         if (result.status == common_types::DroneStepStatus::Continue) {
@@ -135,25 +136,31 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
         }
 
         if (result.status == common_types::DroneStepStatus::Completed) {
-            status = common_types::MissionRunStatus::Completed;
-            completion_message = result.message;
-            if (result.message == DroneControlImpl::kUnmappableVoxelsMessage) {
-                std::cerr << "MissionControlImpl::runMission: " << result.message << '\n';
-                errors.push_back(common_types::ErrorRef{"UNMAPPABLE_VOXELS_REMAINING", result.message});
-            }
+            handleStepCompleted(result, outcome);
             break;
         }
 
         // DroneStepStatus::Error is recorded but does not terminate the mission.
         std::cerr << "MissionControlImpl::runMission: drone control error: " << result.message << '\n';
-        errors.push_back(common_types::ErrorRef{"DRONE_CONTROL_ERROR", result.message});
+        outcome.errors.push_back(common_types::ErrorRef{"DRONE_CONTROL_ERROR", result.message});
     }
+}
 
-    saveOutputMap(output_map_, output_map_file_, errors, verbose_log);
+common_types::MissionRunResult MissionControlImpl::runMission() {
+    StepLoopOutcome outcome;
 
-    writeVerboseSummary(verbose_log, status, steps, errors.size(), output_map_file_, completion_message);
+    // Opened only when -verbose is set; every write below is guarded by is_open(), so this stays
+    // a no-op (no file created, nothing written) otherwise.
+    std::ofstream verbose_log = openVerboseLog(verbose_, output_map_file_, mission_.max_steps);
 
-    return common_types::MissionRunResult{status, steps, errors};
+    runStepLoop(outcome, verbose_log);
+
+    saveOutputMap(output_map_, output_map_file_, outcome.errors, verbose_log);
+
+    writeVerboseSummary(verbose_log, outcome.status, outcome.steps, outcome.errors.size(), output_map_file_,
+                       outcome.completion_message);
+
+    return common_types::MissionRunResult{outcome.status, outcome.steps, outcome.errors};
 }
 
 REGISTER_MISSION_CONTROL(MissionControlImpl);

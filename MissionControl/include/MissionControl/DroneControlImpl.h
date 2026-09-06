@@ -54,12 +54,29 @@ private:
         bool heading_verified = true;
     };
 
+    struct StepLogBookkeeping {
+        std::string action;
+        common::Orientation resulting_heading;
+        bool heading_known = false;
+        std::optional<std::size_t> scan_hits;
+    };
+
     // Validates the pre-step GPS reading; returns a result only when step() must end early.
     [[nodiscard]] std::optional<common::types::DroneStepResult> handlePreStepGps(
         common::Position3D& gps_position);
 
     // Validates and prepares one Algorithm command for execution.
     [[nodiscard]] PendingMovementSequence prepareNextSequence(const common::Position3D& gps_position);
+
+    // Retries mapping_algorithm_.nextStep() until it returns a valid, non-NOOP command.
+    // Throws if every attempt failed.
+    [[nodiscard]] common::types::MappingStepCommand fetchValidAlgorithmCommand(
+        const common::types::DroneState& state, const common::types::LidarScanResult* latest_scan_ptr);
+
+    // Shortens a position-changing movement to the largest legal in-bounds distance from `state`,
+    // unchanged if already legal, or nullopt if no legal movement in that direction exists at all.
+    [[nodiscard]] std::optional<common::types::MovementCommand> shortenMovementToBounds(
+        const common::types::MovementCommand& movement, const common::types::DroneState& state);
 
     // Returns a valid GPS reading matching the expected post-movement position.
     [[nodiscard]] std::optional<common::Position3D> validatePostMovementGps(
@@ -69,10 +86,44 @@ private:
     [[nodiscard]] std::optional<common::types::DroneStepResult> dispatchMovementAndValidateGps(
         const common::types::MovementCommand& movement, const common::Orientation& heading);
 
+    // Dispatches one movement chunk to movement_, retrying on failure.
+    // Returns the result of the last attempt (success or otherwise).
+    [[nodiscard]] common::types::MovementResult dispatchMovementWithRetries(
+        const common::types::MovementCommand& movement);
+
     // Performs a LiDAR scan with retries and applies it to the output map.
     [[nodiscard]] std::optional<common::types::DroneStepResult> dispatchScanAndApplyToMap(
         const common::Orientation& scan_orientation, const common::Position3D& post_move_pos,
         const common::Orientation& post_move_heading);
+
+    // Dispatches `movement_to_dispatch` (if any) via dispatchMovementAndValidateGps(), clearing
+    // pending.heading_verified when an executed chunk was a Rotate, and logging/returning on
+    // error. A no-op returning nullopt if movement_to_dispatch is empty. Returns a result only
+    // when step() must return early with it.
+    [[nodiscard]] std::optional<common::types::DroneStepResult> dispatchPendingMovementChunk(
+        PendingMovementSequence& pending,
+        const std::optional<common::types::MovementCommand>& movement_to_dispatch);
+
+    // Called once step() has confirmed pending.movements is still non-empty after dispatching one
+    // chunk: advances step_index_, clears latest_scan_, logs, and returns the "working" Continue
+    // result that step() should return immediately.
+    [[nodiscard]] common::types::DroneStepResult deferRemainingMovementChunks(
+        const PendingMovementSequence& pending,
+        const std::optional<common::types::MovementCommand>& movement_to_dispatch);
+
+    // Performs this step's scan (if scan_orientation has a value) via dispatchScanAndApplyToMap(),
+    // or clears latest_scan_ when no scan was requested. Updates `log` for verbose logging only --
+    // never feeds back into scan_error/status/position. Returns a result only when step() must
+    // return early with it.
+    [[nodiscard]] std::optional<common::types::DroneStepResult> dispatchPendingScan(
+        const std::optional<common::Orientation>& scan_orientation, const common::Position3D& gps_position,
+        const std::optional<common::types::MovementCommand>& movement_to_dispatch, StepLogBookkeeping& log);
+
+    // Builds and records this step's verbose-log line from the already-computed action/heading/
+    // scan bookkeeping. No-op when not verbose.
+    void recordStepOutcomeLog(const StepLogBookkeeping& log,
+                              const std::optional<common::types::MovementCommand>& movement_to_dispatch,
+                              common::types::AlgorithmStatus status);
 
     // Builds and stores the compact verbose-log line for the step() call currently in progress.
     // `heading` and `scan_hits` are omitted from the line when not meaningful for this step.

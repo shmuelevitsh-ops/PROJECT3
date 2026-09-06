@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <numbers>
 #include <optional>
 #include <queue>
 #include <unordered_map>
@@ -117,7 +118,7 @@ struct MovementPlan {
 [[nodiscard]] double numDeg(AltitudeAngle v) { return v.force_numerical_value_in(deg); }
 
 [[nodiscard]] double atan2Deg(double y, double x) {
-    return std::atan2(y, x) * 180.0 / M_PI;
+    return std::atan2(y, x) * 180.0 / std::numbers::pi;
 }
 
 // Wraps an angle in degrees to (-180, 180].
@@ -248,6 +249,28 @@ struct MovementPlan {
         }
     }
     return true;
+}
+
+// The two conditions every BFS neighbor expansion in frontierBfs()/findSafePathTo() must pass:
+// the voxel itself must be known-Empty, and its surrounding safety sphere must be clear.
+[[nodiscard]] bool isTraversableVoxel(const Context& ctx, const VoxelIndex& idx, const Position3D& offset) {
+    if (ctx.map.atVoxel(toWorldCenter(idx, ctx.map.getMapConfig())) != common_types::VoxelOccupancy::Empty) {
+        return false;
+    }
+    return isSafeVoxel(ctx, idx, offset);
+}
+
+// Walks `parent` back from `end` to `start` and returns the forward-ordered path (start
+// exclusive, end inclusive) -- shared by frontierBfs() and findSafePathTo().
+[[nodiscard]] std::vector<VoxelIndex> reconstructPath(
+    const std::unordered_map<VoxelIndex, VoxelIndex, VoxelIndexHash>& parent, const VoxelIndex& start,
+    const VoxelIndex& end) {
+    std::vector<VoxelIndex> path;
+    for (VoxelIndex node = end; !(node == start); node = parent.at(node)) {
+        path.push_back(node);
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
 }
 
 // Computes the scan orientation relative to `heading` that points from `from` toward `to`,
@@ -932,10 +955,7 @@ BfsResult MappingAlgorithmImpl::Impl::frontierBfs(const Context& ctx, const Voxe
             result.found = true;
             result.frontier = s;
             result.target = *target;
-            for (VoxelIndex node = s; !(node == start); node = parent.at(node)) {
-                result.path.push_back(node);
-            }
-            std::reverse(result.path.begin(), result.path.end());
+            result.path = reconstructPath(parent, start, s);
             return result;
         }
 
@@ -945,10 +965,7 @@ BfsResult MappingAlgorithmImpl::Impl::frontierBfs(const Context& ctx, const Voxe
                 continue;
             }
             visited.insert(n);
-            if (ctx.map.atVoxel(toWorldCenter(n, ctx.map.getMapConfig())) != common_types::VoxelOccupancy::Empty) {
-                continue;
-            }
-            if (!isSafeVoxel(ctx, n, offset)) {
+            if (!isTraversableVoxel(ctx, n, offset)) {
                 continue;
             }
             parent[n] = s;
@@ -981,20 +998,12 @@ std::optional<std::vector<VoxelIndex>> MappingAlgorithmImpl::Impl::findSafePathT
                 continue;
             }
             visited.insert(n);
-            if (ctx.map.atVoxel(toWorldCenter(n, ctx.map.getMapConfig())) != common_types::VoxelOccupancy::Empty) {
-                continue;
-            }
-            if (!isSafeVoxel(ctx, n, offset)) {
+            if (!isTraversableVoxel(ctx, n, offset)) {
                 continue;
             }
             parent[n] = s;
             if (n == destination) {
-                std::vector<VoxelIndex> path;
-                for (VoxelIndex node = n; !(node == start); node = parent.at(node)) {
-                    path.push_back(node);
-                }
-                std::reverse(path.begin(), path.end());
-                return path;
+                return reconstructPath(parent, start, n);
             }
             open.push(n);
         }

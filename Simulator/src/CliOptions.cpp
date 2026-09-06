@@ -57,7 +57,6 @@ std::optional<std::vector<std::filesystem::path>> collectSharedLibraries(const s
         if (!stat_ec && is_regular && entry->path().extension() == ".so") {
             libraries.push_back(entry->path());
         }
-        // Skip entries that isn't a usable .so
 
         entry.increment(ec);
         if (ec) {
@@ -209,6 +208,45 @@ std::optional<int> parseNumThreadsOption(const ParsedArgs& parsed, std::vector<s
     return num_threads;
 }
 
+// Validates that path is an existing, openable file for the given key.
+// If not, appends a descriptive error to errors.
+void validateOpenableFileArg(const std::string& key, const std::filesystem::path& path,
+                             std::vector<std::string>& errors) {
+    if (!isOpenableFile(path)) {
+        errors.push_back(key + "='" + path.string() + "' is not an existing, openable file");
+    }
+}
+
+// Validates that dir is an existing, traversable directory containing at least one .so file.
+// Returns the discovered libraries, or nullopt (after appending a descriptive error for key) if invalid.
+std::optional<std::vector<std::filesystem::path>> validateLibraryFolderArg(const std::string& key,
+                                                                           const std::filesystem::path& dir,
+                                                                           std::vector<std::string>& errors) {
+    std::optional<std::vector<std::filesystem::path>> libraries = collectSharedLibraries(dir);
+    if (!libraries) {
+        errors.push_back(key + "='" + dir.string() +
+                         "' is not an existing, traversable directory containing at least one .so file");
+    }
+    return libraries;
+}
+
+// Validates the simulation file, the mode's other required file, and its libraries folder --
+// the flow shared by both buildComparativeOptions() and buildCompetitionOptions(). Prints usage
+// and returns nullopt if any check failed, otherwise returns the discovered libraries.
+std::optional<std::vector<std::filesystem::path>> validateCommonArgs(
+    const std::filesystem::path& simulation, const std::string& file_key, const std::filesystem::path& file_path,
+    const std::string& folder_key, const std::filesystem::path& folder_path, std::vector<std::string> errors) {
+    validateOpenableFileArg("simulation", simulation, errors);
+    validateOpenableFileArg(file_key, file_path, errors);
+    std::optional<std::vector<std::filesystem::path>> libraries = validateLibraryFolderArg(folder_key, folder_path, errors);
+
+    if (!errors.empty()) {
+        printUsage(errors);
+        return std::nullopt;
+    }
+    return libraries;
+}
+
 // Validates the comparative-mode file and folder arguments.
 // Builds and returns ComparativeOptions if all values are valid.
 std::optional<ComparativeOptions> buildComparativeOptions(const ParsedArgs& parsed, std::optional<int> num_threads,
@@ -217,20 +255,9 @@ std::optional<ComparativeOptions> buildComparativeOptions(const ParsedArgs& pars
     const std::filesystem::path mission_control_folder = parsed.values.at("mission_control_folder").front();
     const std::filesystem::path algorithm = parsed.values.at("algorithm").front();
 
-    if (!isOpenableFile(simulation)) {
-        errors.push_back("simulation='" + simulation.string() + "' is not an existing, openable file");
-    }
-    if (!isOpenableFile(algorithm)) {
-        errors.push_back("algorithm='" + algorithm.string() + "' is not an existing, openable file");
-    }
-    std::optional<std::vector<std::filesystem::path>> libraries = collectSharedLibraries(mission_control_folder);
+    std::optional<std::vector<std::filesystem::path>> libraries = validateCommonArgs(
+        simulation, "algorithm", algorithm, "mission_control_folder", mission_control_folder, std::move(errors));
     if (!libraries) {
-        errors.push_back("mission_control_folder='" + mission_control_folder.string() +
-                         "' is not an existing, traversable directory containing at least one .so file");
-    }
-
-    if (!errors.empty()) {
-        printUsage(errors);
         return std::nullopt;
     }
 
@@ -252,20 +279,9 @@ std::optional<CompetitionOptions> buildCompetitionOptions(const ParsedArgs& pars
     const std::filesystem::path mission_control = parsed.values.at("mission_control").front();
     const std::filesystem::path algorithms_folder = parsed.values.at("algorithms_folder").front();
 
-    if (!isOpenableFile(simulation)) {
-        errors.push_back("simulation='" + simulation.string() + "' is not an existing, openable file");
-    }
-    if (!isOpenableFile(mission_control)) {
-        errors.push_back("mission_control='" + mission_control.string() + "' is not an existing, openable file");
-    }
-    std::optional<std::vector<std::filesystem::path>> libraries = collectSharedLibraries(algorithms_folder);
+    std::optional<std::vector<std::filesystem::path>> libraries = validateCommonArgs(
+        simulation, "mission_control", mission_control, "algorithms_folder", algorithms_folder, std::move(errors));
     if (!libraries) {
-        errors.push_back("algorithms_folder='" + algorithms_folder.string() +
-                         "' is not an existing, traversable directory containing at least one .so file");
-    }
-
-    if (!errors.empty()) {
-        printUsage(errors);
         return std::nullopt;
     }
 

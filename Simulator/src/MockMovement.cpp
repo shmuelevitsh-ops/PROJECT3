@@ -6,6 +6,7 @@
 #include <UserCommon/SphereAabbCollision.h>
 
 #include <cmath>
+#include <string>
 
 namespace simulator {
 
@@ -112,6 +113,24 @@ constexpr double kPathSampleStepFraction = 0.1;
     return sphereHitsWall(map, destination, radius);
 }
 
+// Shared by advance()/elevate(): applies `next_pos` if the path from `current_pos` is
+// collision-free, otherwise throws MOVEMENT_COLLISION naming `action` ("advance"/"elevate").
+[[nodiscard]] types::MovementResult moveIfSafe(MockGPS& gps, const IMap3D& hidden_map, PhysicalLength radius,
+                                                const Position3D& current_pos, const Position3D& next_pos,
+                                                const char* action) {
+    if (pathCollides(hidden_map, current_pos, next_pos, radius)) {
+        throw SimulationException(
+            "MOVEMENT_COLLISION",
+            std::string("MockMovement::") + action +
+                ": MOVEMENT_COLLISION - drone sphere intersects an occupied "
+                "voxel (wall) along the " +
+                action + " path; the drone was not moved.");
+    }
+
+    gps.setPosition(next_pos);
+    return types::MovementResult{true, {}};
+}
+
 } // namespace
 
 MockMovement::MockMovement(MockGPS& gps, const IMap3D& hidden_map, PhysicalLength drone_radius)
@@ -147,15 +166,7 @@ types::MovementResult MockMovement::advance(PhysicalLength distance) {
         current_pos.z,
     };
 
-    if (pathCollides(hidden_map_, current_pos, next_pos, drone_radius_)) {
-        throw SimulationException(
-            "MOVEMENT_COLLISION",
-            "MockMovement::advance: MOVEMENT_COLLISION - drone sphere intersects an occupied "
-            "voxel (wall) along the advance path; the drone was not moved.");
-    }
-
-    gps_.setPosition(next_pos);
-    return types::MovementResult{true, {}};
+    return moveIfSafe(gps_, hidden_map_, drone_radius_, current_pos, next_pos, "advance");
 }
 
 types::MovementResult MockMovement::elevate(PhysicalLength distance) {
@@ -169,15 +180,7 @@ types::MovementResult MockMovement::elevate(PhysicalLength distance) {
         current_pos.z + distance_cm * z_extent[cm],
     };
 
-    if (pathCollides(hidden_map_, current_pos, next_pos, drone_radius_)) {
-        throw SimulationException(
-            "MOVEMENT_COLLISION",
-            "MockMovement::elevate: MOVEMENT_COLLISION - drone sphere intersects an occupied "
-            "voxel (wall) along the elevate path; the drone was not moved.");
-    }
-
-    gps_.setPosition(next_pos);
-    return types::MovementResult{true, {}};
+    return moveIfSafe(gps_, hidden_map_, drone_radius_, current_pos, next_pos, "elevate");
 }
 
 } // namespace simulator

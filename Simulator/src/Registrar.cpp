@@ -61,45 +61,56 @@ void Registrar::addMissionControl(common::MissionControlFactory factory) {
     mission_control_factories_.push_back(std::move(factory));
 }
 
-common::MappingAlgorithmFactory Registrar::loadMappingAlgorithm(
-    const std::filesystem::path& library_path) {
-    // Remember the registry sizes so we can detect what this .so registers.
-    const std::size_t mapping_before = mapping_algorithm_factories_.size();
-    const std::size_t mission_before = mission_control_factories_.size();
-
+template <typename TargetFactory, typename OtherFactory>
+TargetFactory Registrar::loadComponent(const std::filesystem::path& library_path,
+                                       std::vector<TargetFactory>& target_factories,
+                                       std::size_t target_before,
+                                       std::vector<OtherFactory>& other_factories,
+                                       std::size_t other_before, const std::string& component_name,
+                                       const std::string& component_name_plural) {
     // Constructing LibraryHandle calls dlopen(); while the .so is being loaded,
     // its global registration object is constructed and registers the factory here.
     LibraryHandle library(library_path);
 
     // Count how many factories of the requested type were added by this load.
-    const std::size_t mapping_registered = mapping_algorithm_factories_.size() - mapping_before;
+    const std::size_t registered = target_factories.size() - target_before;
 
-    if (mapping_registered == 0) {
-        // No mapping factory was registered. Remove any wrong-type registrations
+    if (registered == 0) {
+        // No factory of the requested type was registered. Remove any wrong-type registrations
         // before the local LibraryHandle unloads the .so.
-        mission_control_factories_.resize(mission_before);
+        other_factories.resize(other_before);
         throw SimulationException("PLUGIN_NOT_REGISTERED",
-                                   library_path.string() + " did not register a mapping algorithm");
+                                   library_path.string() + " did not register a " + component_name);
     }
 
-    if (mapping_registered > 1) {
-        // More than one mapping factory was registered. Erase every factory this failed load
-        // added (not just the extras) along with any wrong-type registrations, before the local
-        // LibraryHandle unloads the .so, so no std::function closing over this .so's code survives.
-        mapping_algorithm_factories_.resize(mapping_before);
-        mission_control_factories_.resize(mission_before);
+    if (registered > 1) {
+        // More than one factory of the requested type was registered. Erase every factory this
+        // failed load added (not just the extras) along with any wrong-type registrations, before
+        // the local LibraryHandle unloads the .so, so no std::function closing over this .so's
+        // code survives.
+        target_factories.resize(target_before);
+        other_factories.resize(other_before);
         throw SimulationException("PLUGIN_MULTIPLE_REGISTRATIONS",
-                                   library_path.string() + " registered " +
-                                       std::to_string(mapping_registered) +
-                                       " mapping algorithms (expected exactly 1)");
+                                   library_path.string() + " registered " + std::to_string(registered) +
+                                       " " + component_name_plural + " (expected exactly 1)");
     }
 
-    // Remove any MissionControl factories accidentally registered by this .so.
-    mission_control_factories_.resize(mission_before);
+    // Remove any factories of the other type accidentally registered by this .so.
+    other_factories.resize(other_before);
     // Keep the .so loaded while its registered factory is still stored.
     libraries_.push_back(std::move(library));
     // Exactly one factory was registered, and push_back placed it at the end.
-    return mapping_algorithm_factories_.back();
+    return target_factories.back();
+}
+
+common::MappingAlgorithmFactory Registrar::loadMappingAlgorithm(
+    const std::filesystem::path& library_path) {
+    // Remember the registry sizes so we can detect what this .so registers.
+    const std::size_t mapping_before = mapping_algorithm_factories_.size();
+    const std::size_t mission_before = mission_control_factories_.size();
+    return loadComponent(library_path, mapping_algorithm_factories_, mapping_before,
+                         mission_control_factories_, mission_before, "mapping algorithm",
+                         "mapping algorithms");
 }
 
 common::MissionControlFactory Registrar::loadMissionControl(
@@ -107,40 +118,9 @@ common::MissionControlFactory Registrar::loadMissionControl(
     // Remember the registry sizes so we can detect what this .so registers.
     const std::size_t mapping_before = mapping_algorithm_factories_.size();
     const std::size_t mission_before = mission_control_factories_.size();
-
-    // Constructing LibraryHandle calls dlopen(); while the .so is being loaded,
-    // its global registration object is constructed and registers the factory here.
-    LibraryHandle library(library_path);
-    
-    // Count how many factories of the requested type were added by this load.
-    const std::size_t mission_registered = mission_control_factories_.size() - mission_before;
-
-    if (mission_registered == 0) {
-        // No mission factory was registered. Remove any wrong-type registrations
-        // before the local LibraryHandle unloads the .so.
-        mapping_algorithm_factories_.resize(mapping_before);
-        throw SimulationException("PLUGIN_NOT_REGISTERED",
-                                   library_path.string() + " did not register a mission control");
-    }
-
-    if (mission_registered > 1) {
-        // More than one mission factory was registered. Erase every factory this failed load
-        // added (not just the extras) along with any wrong-type registrations, before the local
-        // LibraryHandle unloads the .so, so no std::function closing over this .so's code survives.
-        mission_control_factories_.resize(mission_before);
-        mapping_algorithm_factories_.resize(mapping_before);
-        throw SimulationException("PLUGIN_MULTIPLE_REGISTRATIONS",
-                                   library_path.string() + " registered " +
-                                       std::to_string(mission_registered) +
-                                       " mission controls (expected exactly 1)");
-    }
-
-    // Remove any MappingAlgorithm factories accidentally registered by this .so.
-    mapping_algorithm_factories_.resize(mapping_before);
-    // Keep the .so loaded while its registered factory is still stored.
-    libraries_.push_back(std::move(library));
-    // Exactly one factory was registered, and push_back placed it at the end.
-    return mission_control_factories_.back();
+    return loadComponent(library_path, mission_control_factories_, mission_before,
+                         mapping_algorithm_factories_, mapping_before, "mission control",
+                         "mission controls");
 }
 
 } // namespace simulator

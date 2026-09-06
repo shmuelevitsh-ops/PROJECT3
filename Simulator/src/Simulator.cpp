@@ -129,7 +129,18 @@ void reportUnexpectedComponentFailure(const std::string& component_name, std::ex
             std::cerr << "component " << component_name
                     << " failed with an unknown exception\n";
         }
-}   
+}
+
+// Builds the ParallelExecutor on_failure callback shared by runComparative() and runCompetition():
+// maps a loaded-task index back to its component's original index and reports the failure.
+// Not a template -- loaded_indices/outcomes have the same concrete types in both callers.
+auto makeComponentFailureHandler(const std::vector<std::size_t>& loaded_indices,
+                                 std::vector<ComponentOutcome>& outcomes) {
+    return [&loaded_indices, &outcomes](std::size_t task_index, std::exception_ptr exception) {
+        const std::size_t index = loaded_indices[task_index];
+        reportUnexpectedComponentFailure(outcomes[index].component_name, exception);
+    };
+}
 
 } // namespace
 
@@ -188,11 +199,7 @@ std::size_t Simulator::runComparative() const {
                         loaded.factories[task_index], options.verbose, ComponentKind::MissionControl,
                         outcomes[index]);
     },
-    [&](std::size_t task_index, std::exception_ptr exception) {
-        // on_failure
-        const std::size_t index = loaded.indices[task_index];
-        reportUnexpectedComponentFailure(outcomes[index].component_name, exception);
-    });
+    makeComponentFailureHandler(loaded.indices, outcomes));
 
     // Split completed components into successful totals and failures.
     // All workers have finished here, so results can now be aggregated safely.
@@ -247,11 +254,7 @@ std::size_t Simulator::runCompetition() const {
                         mission_control_factory, options.verbose, ComponentKind::MappingAlgorithm,
                         outcomes[index]);
     },
-    [&](std::size_t task_index, std::exception_ptr exception) {
-        // on_failure
-        const std::size_t index = loaded.indices[task_index];
-        reportUnexpectedComponentFailure(outcomes[index].component_name, exception);
-    });
+    makeComponentFailureHandler(loaded.indices, outcomes));
 
     // Split completed components into successful totals and failures.
     // All workers have finished here, so results can now be aggregated safely.

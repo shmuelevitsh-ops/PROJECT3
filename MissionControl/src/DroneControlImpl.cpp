@@ -365,27 +365,50 @@ DroneControlImpl::DroneControlImpl(common_types::DroneConfigData drone,
       mapping_algorithm_(mapping_algorithm),
       verbose_(verbose) {}
 
+common_types::MappingStepCommand DroneControlImpl::fetchValidAlgorithmCommand(
+    const common_types::DroneState& state, const common_types::LidarScanResult* latest_scan_ptr) {
+    // Retry invalid or NOOP Algorithm commands without advancing the step.
+    common_types::MappingStepCommand command;
+    for (int attempt = 0; attempt < kMaxAlgorithmAttempts; ++attempt) {
+        command = mapping_algorithm_.nextStep(state, latest_scan_ptr);
+        if (isAlgorithmCommandValid(command) && !isFaultyNoop(command)) {
+            return command;
+        }
+    }
+    throw std::runtime_error(
+        "DroneControlImpl::prepareNextSequence: the Algorithm returned an invalid or "
+        "no-op command " + std::to_string(kMaxAlgorithmAttempts) + " times in a row");
+}
+
+std::optional<common_types::MovementCommand> DroneControlImpl::shortenMovementToBounds(
+    const common_types::MovementCommand& movement, const common_types::DroneState& state) {
+    if (movement.type != common_types::MovementCommandType::Advance &&
+        movement.type != common_types::MovementCommandType::Elevate) {
+        return movement;
+    }
+
+    const MovementDelta delta = movementDelta(movement, state);
+    if (output_map_.isInBounds(applyDelta(state.position, delta, 1.0))) {
+        return movement;
+    }
+
+    const double fraction =
+        legalMovementFraction(output_map_, delta, state, output_map_.getMapConfig().boundaries);
+    if (fraction <= 0.0) {
+        return std::nullopt; // no legal movement in that direction at all.
+    }
+    common_types::MovementCommand shortened = movement;
+    shortened.distance = movement.distance * fraction;
+    return shortened;
+}
+
 DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
     const Position3D& gps_position) {
     const common_types::DroneState state{gps_position, gps_.heading(), step_index_};
     const common_types::LidarScanResult* latest_scan_ptr =
         latest_scan_ ? &(*latest_scan_) : nullptr;
 
-    // Retry invalid or NOOP Algorithm commands without advancing the step.
-    common_types::MappingStepCommand command;
-    bool accepted = false;
-    for (int attempt = 0; attempt < kMaxAlgorithmAttempts; ++attempt) {
-        command = mapping_algorithm_.nextStep(state, latest_scan_ptr);
-        if (isAlgorithmCommandValid(command) && !isFaultyNoop(command)) {
-            accepted = true;
-            break;
-        }
-    }
-    if (!accepted) {
-        throw std::runtime_error(
-            "DroneControlImpl::prepareNextSequence: the Algorithm returned an invalid or "
-            "no-op command " + std::to_string(kMaxAlgorithmAttempts) + " times in a row");
-    }
+    const common_types::MappingStepCommand command = fetchValidAlgorithmCommand(state, latest_scan_ptr);
 
     PendingMovementSequence pending;
     pending.scan_orientation = command.scan_orientation;
@@ -396,34 +419,21 @@ DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
         return pending;
     }
 
-    common_types::MovementCommand movement = *command.movement;
-
-    // Shorten position-changing movements to the largest legal in-bounds distance.
-    if (movement.type == common_types::MovementCommandType::Advance ||
-        movement.type == common_types::MovementCommandType::Elevate) {
-        const MovementDelta delta = movementDelta(movement, state);
-
-        if (!output_map_.isInBounds(applyDelta(state.position, delta, 1.0))) {
-            const double fraction =
-                legalMovementFraction(output_map_, delta, state, output_map_.getMapConfig().boundaries);
-
-            if (fraction <= 0.0) {
-                return pending; // no legal movement -- pending.movements stays empty.
-            }
-            movement.distance = movement.distance * fraction;
-        }
+    const std::optional<common_types::MovementCommand> movement =
+        shortenMovementToBounds(*command.movement, state);
+    if (!movement.has_value()) {
+        return pending; // no legal movement -- pending.movements stays empty.
     }
 
-    pending.movements = splitMovement(movement, drone_);
+    pending.movements = splitMovement(*movement, drone_);
     return pending;
 }
 
-std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchMovementAndValidateGps(
-    const common_types::MovementCommand& movement, const Orientation& heading) {
+common_types::MovementResult DroneControlImpl::dispatchMovementWithRetries(
+    const common_types::MovementCommand& movement) {
     common_types::MovementResult result{};
 
     // Retry the same movement chunk when the driver reports failure.
-    bool movement_succeeded = false;
     for (int attempt = 0; attempt < kMaxMovementAttempts; ++attempt) {
         switch (movement.type) {
             case common_types::MovementCommandType::Hover:
@@ -440,12 +450,18 @@ std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchMovementA
         }
 
         if (result.success) {
-            movement_succeeded = true;
             break;
         }
     }
 
-    if (!movement_succeeded) {
+    return result;
+}
+
+std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchMovementAndValidateGps(
+    const common_types::MovementCommand& movement, const Orientation& heading) {
+    const common_types::MovementResult result = dispatchMovementWithRetries(movement);
+
+    if (!result.success) {
         pending_sequence_.reset();
         throw std::runtime_error(
             "DroneControlImpl::step: the movement driver returned failure " +
@@ -565,6 +581,129 @@ std::optional<common_types::DroneStepResult> DroneControlImpl::handlePreStepGps(
     return std::nullopt;
 }
 
+std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchPendingMovementChunk(
+    PendingMovementSequence& pending, const std::optional<common_types::MovementCommand>& movement_to_dispatch) {
+    if (!movement_to_dispatch) {
+        return std::nullopt;
+    }
+
+    const std::optional<common_types::DroneStepResult> movement_error =
+        dispatchMovementAndValidateGps(*movement_to_dispatch, pending.heading);
+    // dispatchMovementAndValidateGps only returns (rather than throwing) once the movement
+    // driver has actually executed this chunk -- even when it then reports Error because
+    // post-movement GPS position validation failed. So a Rotate chunk's heading must be
+    // invalidated here, before any logging below, regardless of whether movement_error is
+    // set: once Rotate has actually executed, the old cached heading is never verified
+    // again. A Rotate's real effect on heading depends on the movement driver's own
+    // Left/Right sign convention -- a convention this class must not assume (a different
+    // team's Simulator may invert it) -- so this only clears the cached value rather than
+    // guessing a replacement. Logging-only: no extra sensor read is added here, and
+    // pending.heading itself is left untouched since dispatchMovementAndValidateGps only
+    // uses it for Advance/Elevate direction math, which Rotate chunks never exercise.
+    if (movement_to_dispatch->type == common_types::MovementCommandType::Rotate) {
+        pending.heading_verified = false;
+    }
+    if (movement_error.has_value()) {
+        if (verbose_) {
+            recordStepLog(movementToString(*movement_to_dispatch), *internal_position_,
+                          pending.heading_verified ? std::optional<Orientation>(pending.heading)
+                                                    : std::nullopt,
+                          std::nullopt, movement_error->status, movement_error->message);
+        }
+        return *movement_error;
+    }
+    return std::nullopt;
+}
+
+common_types::DroneStepResult DroneControlImpl::deferRemainingMovementChunks(
+    const PendingMovementSequence& pending,
+    const std::optional<common_types::MovementCommand>& movement_to_dispatch) {
+    ++step_index_;
+    latest_scan_ = std::nullopt;
+    if (verbose_) {
+        recordStepLog(movementToString(*movement_to_dispatch), *internal_position_,
+                      pending.heading_verified ? std::optional<Orientation>(pending.heading)
+                                                : std::nullopt,
+                      std::nullopt, common_types::DroneStepStatus::Continue, "");
+    }
+    return common_types::DroneStepResult{
+        common_types::DroneStepStatus::Continue, "working"};
+}
+
+std::optional<common_types::DroneStepResult> DroneControlImpl::dispatchPendingScan(
+    const std::optional<Orientation>& scan_orientation, const Position3D& gps_position,
+    const std::optional<common_types::MovementCommand>& movement_to_dispatch, StepLogBookkeeping& log) {
+    if (!scan_orientation.has_value()) {
+        latest_scan_ = std::nullopt;
+        return std::nullopt;
+    }
+
+    // Use the validated post-movement position as the scan origin when movement occurred.
+    const Position3D post_move_pos = movement_to_dispatch ? *internal_position_ : gps_position;
+    const Orientation post_move_heading = gps_.heading();
+    log.resulting_heading = post_move_heading;
+    // gps_.heading() was just read above for the scan itself (not an extra call added for
+    // logging), so this is a genuine reading regardless of any earlier unverified Rotate.
+    log.heading_known = true;
+
+    if (verbose_) {
+        const std::string scan_action = scanToString(*scan_orientation);
+        log.action = log.action.empty() ? scan_action : log.action + " + " + scan_action;
+    }
+
+    const std::optional<common_types::DroneStepResult> scan_error =
+        dispatchScanAndApplyToMap(*scan_orientation, post_move_pos, post_move_heading);
+    if (scan_error.has_value()) {
+        if (verbose_) {
+            recordStepLog(log.action, post_move_pos, std::nullopt, std::nullopt, scan_error->status,
+                          scan_error->message);
+        }
+        return *scan_error;
+    }
+    // dispatchScanAndApplyToMap just refreshed latest_scan_ to the accepted scan on success.
+    if (verbose_) {
+        log.scan_hits = latest_scan_ ? std::optional<std::size_t>(latest_scan_->size()) : std::nullopt;
+    }
+    return std::nullopt;
+}
+
+void DroneControlImpl::recordStepOutcomeLog(const StepLogBookkeeping& log,
+                                            const std::optional<common_types::MovementCommand>& movement_to_dispatch,
+                                            common_types::AlgorithmStatus status) {
+    if (!verbose_) {
+        return;
+    }
+    std::string action = log.action;
+    if (action.empty()) {
+        action = "no movement/scan";
+    }
+    // Only ever show a heading that was actually read (or provably unchanged since it was
+    // last read): a scan-only step has no fresh movement to attribute a heading to, and a
+    // movement step whose heading is not `heading_known` (an unverified Rotate with no later
+    // scan this call) omits it rather than display a possibly-wrong guess.
+    const std::optional<Orientation> heading_for_log =
+        (movement_to_dispatch && log.heading_known) ? std::optional<Orientation>(log.resulting_heading)
+                                                     : std::nullopt;
+    switch (status) {
+        case common_types::AlgorithmStatus::Working:
+            recordStepLog(action, *internal_position_, heading_for_log, log.scan_hits,
+                          common_types::DroneStepStatus::Continue, "");
+            break;
+        case common_types::AlgorithmStatus::Finished:
+            recordStepLog(action, *internal_position_, heading_for_log, log.scan_hits,
+                          common_types::DroneStepStatus::Completed, "mapping finished");
+            break;
+        case common_types::AlgorithmStatus::FinishedWithUnmappableVoxels:
+            recordStepLog(action, *internal_position_, heading_for_log, log.scan_hits,
+                          common_types::DroneStepStatus::Completed, kUnmappableVoxelsMessage);
+            break;
+        default:
+            recordStepLog(action, *internal_position_, heading_for_log, log.scan_hits,
+                          common_types::DroneStepStatus::Error, "unhandled AlgorithmStatus");
+            break;
+    }
+}
+
 common_types::DroneStepResult DroneControlImpl::step() {
     Position3D gps_position{};
     const std::optional<common_types::DroneStepResult> gps_error = handlePreStepGps(gps_position);
@@ -587,46 +726,15 @@ common_types::DroneStepResult DroneControlImpl::step() {
     }
 
     // Movement precedes scanning; movement exceptions propagate unchanged.
-    if (movement_to_dispatch) {
-        const std::optional<common_types::DroneStepResult> movement_error =
-            dispatchMovementAndValidateGps(*movement_to_dispatch, pending.heading);
-        // dispatchMovementAndValidateGps only returns (rather than throwing) once the movement
-        // driver has actually executed this chunk -- even when it then reports Error because
-        // post-movement GPS position validation failed. So a Rotate chunk's heading must be
-        // invalidated here, before any logging below, regardless of whether movement_error is
-        // set: once Rotate has actually executed, the old cached heading is never verified
-        // again. A Rotate's real effect on heading depends on the movement driver's own
-        // Left/Right sign convention -- a convention this class must not assume (a different
-        // team's Simulator may invert it) -- so this only clears the cached value rather than
-        // guessing a replacement. Logging-only: no extra sensor read is added here, and
-        // pending.heading itself is left untouched since dispatchMovementAndValidateGps only
-        // uses it for Advance/Elevate direction math, which Rotate chunks never exercise.
-        if (movement_to_dispatch->type == common_types::MovementCommandType::Rotate) {
-            pending.heading_verified = false;
-        }
-        if (movement_error.has_value()) {
-            if (verbose_) {
-                recordStepLog(movementToString(*movement_to_dispatch), *internal_position_,
-                              pending.heading_verified ? std::optional<Orientation>(pending.heading)
-                                                        : std::nullopt,
-                              std::nullopt, movement_error->status, movement_error->message);
-            }
-            return *movement_error;
-        }
+    const std::optional<common_types::DroneStepResult> movement_error =
+        dispatchPendingMovementChunk(pending, movement_to_dispatch);
+    if (movement_error.has_value()) {
+        return *movement_error;
     }
 
     // Defer the command's scan and status until its final movement chunk.
     if (!pending.movements.empty()) {
-        ++step_index_;
-        latest_scan_ = std::nullopt;
-        if (verbose_) {
-            recordStepLog(movementToString(*movement_to_dispatch), *internal_position_,
-                          pending.heading_verified ? std::optional<Orientation>(pending.heading)
-                                                    : std::nullopt,
-                          std::nullopt, common_types::DroneStepStatus::Continue, "");
-        }
-        return common_types::DroneStepResult{
-            common_types::DroneStepStatus::Continue, "working"};
+        return deferRemainingMovementChunks(pending, movement_to_dispatch);
     }
 
     const std::optional<Orientation> scan_orientation = pending.scan_orientation;
@@ -638,77 +746,22 @@ common_types::DroneStepResult DroneControlImpl::step() {
     // Everything below this point (action/heading/hits) is verbose-log bookkeeping only: it
     // never feeds back into scan_error/status/position and is skipped entirely when the mission
     // was not started with -verbose.
-    std::string action;
-    Orientation resulting_heading = heading_after_movement;
-    bool heading_known = heading_after_movement_verified;
-    std::optional<std::size_t> scan_hits;
+    StepLogBookkeeping log;
+    log.resulting_heading = heading_after_movement;
+    log.heading_known = heading_after_movement_verified;
     if (verbose_ && movement_to_dispatch) {
-        action = movementToString(*movement_to_dispatch);
+        log.action = movementToString(*movement_to_dispatch);
     }
 
-    if (scan_orientation.has_value()) {
-        // Use the validated post-movement position as the scan origin when movement occurred.
-        const Position3D post_move_pos = movement_to_dispatch ? *internal_position_ : gps_position;
-        const Orientation post_move_heading = gps_.heading();
-        resulting_heading = post_move_heading;
-        // gps_.heading() was just read above for the scan itself (not an extra call added for
-        // logging), so this is a genuine reading regardless of any earlier unverified Rotate.
-        heading_known = true;
-
-        if (verbose_) {
-            const std::string scan_action = scanToString(*scan_orientation);
-            action = action.empty() ? scan_action : action + " + " + scan_action;
-        }
-
-        const std::optional<common_types::DroneStepResult> scan_error =
-            dispatchScanAndApplyToMap(*scan_orientation, post_move_pos, post_move_heading);
-        if (scan_error.has_value()) {
-            if (verbose_) {
-                recordStepLog(action, post_move_pos, std::nullopt, std::nullopt, scan_error->status,
-                              scan_error->message);
-            }
-            return *scan_error;
-        }
-        // dispatchScanAndApplyToMap just refreshed latest_scan_ to the accepted scan on success.
-        if (verbose_) {
-            scan_hits = latest_scan_ ? std::optional<std::size_t>(latest_scan_->size()) : std::nullopt;
-        }
-    } else {
-        latest_scan_ = std::nullopt;
+    const std::optional<common_types::DroneStepResult> scan_error =
+        dispatchPendingScan(scan_orientation, gps_position, movement_to_dispatch, log);
+    if (scan_error.has_value()) {
+        return *scan_error;
     }
 
     ++step_index_;
 
-    if (verbose_) {
-        if (action.empty()) {
-            action = "no movement/scan";
-        }
-        // Only ever show a heading that was actually read (or provably unchanged since it was
-        // last read): a scan-only step has no fresh movement to attribute a heading to, and a
-        // movement step whose heading is not `heading_known` (an unverified Rotate with no later
-        // scan this call) omits it rather than display a possibly-wrong guess.
-        const std::optional<Orientation> heading_for_log =
-            (movement_to_dispatch && heading_known) ? std::optional<Orientation>(resulting_heading)
-                                                     : std::nullopt;
-        switch (status) {
-            case common_types::AlgorithmStatus::Working:
-                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
-                              common_types::DroneStepStatus::Continue, "");
-                break;
-            case common_types::AlgorithmStatus::Finished:
-                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
-                              common_types::DroneStepStatus::Completed, "mapping finished");
-                break;
-            case common_types::AlgorithmStatus::FinishedWithUnmappableVoxels:
-                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
-                              common_types::DroneStepStatus::Completed, kUnmappableVoxelsMessage);
-                break;
-            default:
-                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
-                              common_types::DroneStepStatus::Error, "unhandled AlgorithmStatus");
-                break;
-        }
-    }
+    recordStepOutcomeLog(log, movement_to_dispatch, status);
 
     switch (status) {
         case common_types::AlgorithmStatus::Working:
