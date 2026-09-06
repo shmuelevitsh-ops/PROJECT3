@@ -14,10 +14,6 @@ namespace common_types = common::types;
 
 namespace {
 
-// Verbose logging is event-based, not per-step (missions can run for many thousands of steps):
-// a lightweight checkpoint line is written only every kVerboseCheckpointInterval completed steps.
-constexpr std::size_t kVerboseCheckpointInterval = 500;
-
 [[nodiscard]] const char* toString(common_types::MissionRunStatus status) {
     switch (status) {
         case common_types::MissionRunStatus::Completed: return "Completed";
@@ -92,7 +88,8 @@ MissionControlImpl::MissionControlImpl(common::MissionControlDependencies depend
                                                           dependencies.gps,
                                                           dependencies.movement,
                                                           dependencies.output_map,
-                                                          dependencies.mapping_algorithm)),
+                                                          dependencies.mapping_algorithm,
+                                                          dependencies.verbose)),
       output_map_file_(std::move(dependencies.output_map_file)),
       verbose_(dependencies.verbose) {}
 
@@ -100,7 +97,6 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
     std::vector<common_types::ErrorRef> errors;
     common_types::MissionRunStatus status = common_types::MissionRunStatus::MaxSteps;
     std::size_t steps = 0;
-    // Records map-save failures without changing the mission outcome.
     std::string completion_message;
 
     // Opened only when -verbose is set; every write below is guarded by is_open(), so this stays
@@ -130,8 +126,8 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
 
         ++steps;
 
-        if (verbose_log.is_open() && steps % kVerboseCheckpointInterval == 0) {
-            verbose_log << "checkpoint: steps=" << steps << '\n';
+        if (verbose_log.is_open()) {
+            verbose_log << "step " << steps << ": " << drone_control_->lastStepLog() << '\n';
         }
 
         if (result.status == common_types::DroneStepStatus::Continue) {
@@ -144,9 +140,6 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
             if (result.message == DroneControlImpl::kUnmappableVoxelsMessage) {
                 std::cerr << "MissionControlImpl::runMission: " << result.message << '\n';
                 errors.push_back(common_types::ErrorRef{"UNMAPPABLE_VOXELS_REMAINING", result.message});
-                if (verbose_log.is_open()) {
-                    verbose_log << "step " << steps << ": " << result.message << '\n';
-                }
             }
             break;
         }
@@ -154,9 +147,6 @@ common_types::MissionRunResult MissionControlImpl::runMission() {
         // DroneStepStatus::Error is recorded but does not terminate the mission.
         std::cerr << "MissionControlImpl::runMission: drone control error: " << result.message << '\n';
         errors.push_back(common_types::ErrorRef{"DRONE_CONTROL_ERROR", result.message});
-        if (verbose_log.is_open()) {
-            verbose_log << "step " << steps << ": drone control error: " << result.message << '\n';
-        }
     }
 
     saveOutputMap(output_map_, output_map_file_, errors, verbose_log);

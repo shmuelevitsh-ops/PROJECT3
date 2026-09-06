@@ -72,7 +72,7 @@ types::LidarScanResult MockLidar::scan(Orientation scan_orientation) const {
         const PhysicalLength radius = static_cast<double>(circle) * config_.d;
 
         for (std::size_t i = 0; i < beam_count; ++i) {
-            const auto theta = (360.0 * static_cast<double>(i) / static_cast<double>(beam_count)) * deg; // explicit static cast for proofing
+            const auto theta = (360.0 * static_cast<double>(i) / static_cast<double>(beam_count)) * deg;
             const PhysicalLength horizontal_offset = radius * si::cos(theta);
             const PhysicalLength altitude_offset = radius * si::sin(theta);
 
@@ -106,7 +106,6 @@ PhysicalLength MockLidar::traceBeam(const Orientation& beam_orientation) const {
     const PhysicalLength step = kBeamSampleStepFraction * map_.getMapConfig().resolution;
 
     for (PhysicalLength distance = 0.0 * cm; distance <= config_.z_max; distance += step) {
-        // Computing target voxel position
         const double distance_cm = distance.force_numerical_value_in(cm);
         const double dir_x = dx.force_numerical_value_in(mp::one);
         const double dir_y = dy.force_numerical_value_in(mp::one);

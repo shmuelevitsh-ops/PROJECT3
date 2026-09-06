@@ -307,7 +307,7 @@ TEST(SimulationManager, DisambiguatesOutputDirectoriesWhenTwoRunsWouldShareTheSa
     EXPECT_EQ(observed_output_paths[0], expected_first);
     EXPECT_EQ(observed_output_paths[1], expected_first.string() + "__2")
         << "second run targeting the same leaf directory must be disambiguated, not silently"
-           " overwrite the first run's map_output.npy";
+           " overwrite the first run's output map";
 }
 
 TEST(SimulationManager, PrefixesCerrLinesWrittenDuringARunWithThatRunsContextAndLeavesOtherLinesAlone) {
@@ -678,6 +678,262 @@ TEST(SimulationManager, ExceptionFromRunRunUsesGenericErrorCodeForNonSimulationE
         << "a generic std::exception (not SimulationException) thrown from run->run() must fall "
            "back to a generic error code, not crash or leave the code empty";
     EXPECT_EQ(report.runs[0].mission_results[0].errors[0].message, "disk full");
+}
+
+// ── ComponentConstructionException: only when EVERY attempted EVALUATED-component construction
+// fails ───────────────────────────────────────────────────────────────────────────────────────
+//
+// A ComponentConstructionException means one of the two injected factories (MappingAlgorithm or
+// MissionControl) could not build its plugin instance for one particular scenario -- since a
+// factory receives run-specific dependencies (mission/drone/lidar), it may fail for one scenario
+// while succeeding for another, so a single occurrence must NOT abort the composition or
+// immediately fail the component. It is still scored -1 like any other per-run failure, and run()
+// keeps going through every remaining scenario. Only once every scenario that reached construction
+// of the EVALUATED component (ComponentKind passed to SimulationManager's constructor -- MissionControl
+// in comparative mode, MappingAlgorithm in competition mode) failed does run() signal a
+// component-level failure (by throwing at the end). A failure tagged with the OTHER, fixed/shared
+// component's kind must never contribute to that decision -- it is still scored -1, but the
+// component under evaluation must not be blamed for its fixed collaborator being broken.
+
+TEST(SimulationManager, ComparativeEvaluatedMissionControlFactoryFailingEveryScenarioClassifiesComponentAsFailed) {
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
+    composition.drone_configs = {DroneConfigData{}, DroneConfigData{}};
+    composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
+    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+    // Both scenarios must actually be attempted -- the failure of the first must not stop the
+    // second from being tried too.
+    EXPECT_CALL(*factory, create(_, _, _, _, _))
+        .Times(2)
+        .WillRepeatedly(Throw(ComponentConstructionException(ComponentKind::MissionControl,
+                                                             "mission control factory refuses to be constructed")));
+
+    // Comparative mode: this SimulationManager is evaluating MissionControl.
+    SimulationManager manager(std::move(factory), file_paths, ComponentKind::MissionControl);
+
+    EXPECT_THROW(
+        static_cast<void>(manager.run(
+            composition, "tests/component/test_output/simulation_manager_test/construction_fails_every_scenario")),
+        ComponentConstructionException)
+        << "once every attempted construction of the evaluated MissionControl has failed, run() "
+           "must signal a component-level failure";
+}
+
+TEST(SimulationManager,
+    ComparativeFixedMappingAlgorithmFactoryFailingEveryScenarioDoesNotFailTheEvaluatedMissionControl) {
+    // The Assignment scenario this protects: a fixed Algorithm's factory is broken, but that must
+    // not put every MissionControl compared against it into errors: -- only the MissionControl
+    // actually under evaluation can be blamed, and here it is never even the one that failed.
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
+    composition.drone_configs = {DroneConfigData{}, DroneConfigData{}};
+    composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
+    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+    EXPECT_CALL(*factory, create(_, _, _, _, _))
+        .Times(2)
+        .WillRepeatedly(Throw(ComponentConstructionException(ComponentKind::MappingAlgorithm,
+                                                             "mapping algorithm factory refuses to be constructed")));
+
+    // Comparative mode: this SimulationManager is evaluating MissionControl, not MappingAlgorithm.
+    SimulationManager manager(std::move(factory), file_paths, ComponentKind::MissionControl);
+
+    SimulationManagerReport report;
+    EXPECT_NO_THROW(report = manager.run(
+        composition,
+        "tests/component/test_output/simulation_manager_test/fixed_mapping_algorithm_fails_every_scenario"))
+        << "a broken FIXED MappingAlgorithm must never fail the MissionControl being evaluated";
+
+    ASSERT_EQ(report.runs.size(), 2u);
+    for (const auto& run : report.runs) {
+        EXPECT_EQ(run.mission_score, -1.0);
+        ASSERT_EQ(run.mission_results.size(), 1u);
+        ASSERT_EQ(run.mission_results[0].errors.size(), 1u);
+        EXPECT_EQ(run.mission_results[0].errors[0].code, "FIXED_COMPONENT_CONSTRUCTION_FAILED")
+            << "a fixed-component construction failure is still a per-run -1, but must be "
+               "distinguishable from the evaluated component's own construction failures";
+    }
+}
+
+TEST(SimulationManager, CompetitionEvaluatedMappingAlgorithmFactoryFailingEveryScenarioClassifiesComponentAsFailed) {
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
+    composition.drone_configs = {DroneConfigData{}, DroneConfigData{}};
+    composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
+    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+    EXPECT_CALL(*factory, create(_, _, _, _, _))
+        .Times(2)
+        .WillRepeatedly(Throw(ComponentConstructionException(ComponentKind::MappingAlgorithm,
+                                                             "mapping algorithm factory refuses to be constructed")));
+
+    // Competition mode: this SimulationManager is evaluating MappingAlgorithm.
+    SimulationManager manager(std::move(factory), file_paths, ComponentKind::MappingAlgorithm);
+
+    EXPECT_THROW(
+        static_cast<void>(manager.run(
+            composition,
+            "tests/component/test_output/simulation_manager_test/competition_construction_fails_every_scenario")),
+        ComponentConstructionException)
+        << "once every attempted construction of the evaluated Algorithm has failed, run() must "
+           "signal a component-level failure";
+}
+
+TEST(SimulationManager,
+    CompetitionFixedMissionControlFactoryFailingEveryScenarioDoesNotFailTheEvaluatedAlgorithm) {
+    // Symmetric to the comparative-mode fixed-Algorithm test above: a fixed MissionControl's
+    // factory is broken, but that must not put every Algorithm compared against it into errors:.
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
+    composition.drone_configs = {DroneConfigData{}, DroneConfigData{}};
+    composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
+    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+    EXPECT_CALL(*factory, create(_, _, _, _, _))
+        .Times(2)
+        .WillRepeatedly(Throw(ComponentConstructionException(ComponentKind::MissionControl,
+                                                             "mission control factory refuses to be constructed")));
+
+    // Competition mode: this SimulationManager is evaluating MappingAlgorithm, not MissionControl.
+    SimulationManager manager(std::move(factory), file_paths, ComponentKind::MappingAlgorithm);
+
+    SimulationManagerReport report;
+    EXPECT_NO_THROW(report = manager.run(
+        composition,
+        "tests/component/test_output/simulation_manager_test/fixed_mission_control_fails_every_scenario"))
+        << "a broken FIXED MissionControl must never fail the Algorithm being evaluated";
+
+    ASSERT_EQ(report.runs.size(), 2u);
+    for (const auto& run : report.runs) {
+        EXPECT_EQ(run.mission_score, -1.0);
+        ASSERT_EQ(run.mission_results.size(), 1u);
+        ASSERT_EQ(run.mission_results[0].errors.size(), 1u);
+        EXPECT_EQ(run.mission_results[0].errors[0].code, "FIXED_COMPONENT_CONSTRUCTION_FAILED");
+    }
+}
+
+// Regression: SimulationRunFactoryImpl::create() always constructs MappingAlgorithm before
+// MissionControl (MissionControlDependencies embeds the MappingAlgorithm instance), so a fixed
+// MissionControl construction failure can only ever happen AFTER the evaluated MappingAlgorithm
+// has already been built successfully. A naive implementation that only tracks the evaluated
+// component's own exceptions would miss this: scenario 1's evaluated-Algorithm failure would
+// increment attempts without a success, and scenario 2's fixed-MissionControl failure wouldn't
+// touch the counters at all -- leaving zero recorded successes even though the Algorithm plainly
+// did construct successfully in scenario 2. That must not classify the Algorithm as failed.
+TEST(SimulationManager,
+    CompetitionFixedMissionControlFailureAfterEvaluatedMappingAlgorithmSucceedsCountsAsAnEvaluatedSuccess) {
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
+    composition.drone_configs = {DroneConfigData{}, DroneConfigData{}}; // 2 runs total
+    composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
+    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+    {
+        ::testing::InSequence seq;
+        // Scenario 1: the evaluated MappingAlgorithm itself fails to construct.
+        EXPECT_CALL(*factory, create(_, _, _, _, _))
+            .WillOnce(Throw(ComponentConstructionException(ComponentKind::MappingAlgorithm,
+                                                           "mapping algorithm factory refuses to be constructed")));
+        // Scenario 2: MappingAlgorithm (evaluated) succeeds, then the fixed MissionControl fails --
+        // proof the evaluated component worked here, even though this scenario still nets a -1.
+        EXPECT_CALL(*factory, create(_, _, _, _, _))
+            .WillOnce(Throw(ComponentConstructionException(ComponentKind::MissionControl,
+                                                           "mission control factory refuses to be constructed")));
+    }
+
+    // Competition mode: this SimulationManager is evaluating MappingAlgorithm.
+    SimulationManager manager(std::move(factory), file_paths, ComponentKind::MappingAlgorithm);
+
+    SimulationManagerReport report;
+    EXPECT_NO_THROW(report = manager.run(
+        composition,
+        "tests/component/test_output/simulation_manager_test/"
+        "competition_fixed_mission_control_fails_after_evaluated_succeeds"))
+        << "the evaluated MappingAlgorithm succeeded in scenario 2 before the fixed MissionControl "
+           "failed, so the Algorithm must not be classified as a failed component";
+
+    ASSERT_EQ(report.runs.size(), 2u) << "both scenarios must have been attempted";
+    EXPECT_EQ(report.runs[0].mission_score, -1.0);
+    ASSERT_EQ(report.runs[0].mission_results.size(), 1u);
+    ASSERT_EQ(report.runs[0].mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(report.runs[0].mission_results[0].errors[0].code, "COMPONENT_CONSTRUCTION_FAILED");
+
+    EXPECT_EQ(report.runs[1].mission_score, -1.0);
+    ASSERT_EQ(report.runs[1].mission_results.size(), 1u);
+    ASSERT_EQ(report.runs[1].mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(report.runs[1].mission_results[0].errors[0].code, "FIXED_COMPONENT_CONSTRUCTION_FAILED");
+}
+
+TEST(SimulationManager, ComponentConstructionExceptionOnOneScenarioScoresNegativeOneWhileALaterScenarioStillRuns) {
+    SimulationCompositionData composition;
+    composition.simulation_mission_groups = {{SimulationConfigData{}, {MissionConfigData{}}}};
+    composition.drone_configs = {DroneConfigData{}, DroneConfigData{}}; // 2 runs total
+    composition.lidar_configs = {LidarConfigData{}};
+
+    CompositionFilePaths file_paths;
+    file_paths.simulation_mission_paths = {{ReferencedConfigFile{"sim.yaml"}, {ReferencedConfigFile{"mission.yaml"}}}};
+    file_paths.drone_paths = {"drone_0.yaml", "drone_1.yaml"};
+    file_paths.lidar_paths = {"lidar.yaml"};
+
+    auto factory = std::make_unique<NiceMock<test::GMockISimulationRunFactory>>();
+    {
+        ::testing::InSequence seq;
+        EXPECT_CALL(*factory, create(_, _, _, _, _))
+            .WillOnce(Throw(ComponentConstructionException(ComponentKind::MissionControl,
+                                                           "mission control factory refuses to be constructed")));
+        EXPECT_CALL(*factory, create(_, _, _, _, _))
+            .WillOnce(Invoke([](const SimulationConfigData&, const MissionConfigData&, const DroneConfigData&,
+                               const LidarConfigData&, const std::filesystem::path&) {
+                auto run = std::make_unique<NiceMock<test::GMockISimulationRun>>();
+                SimulationResult result;
+                result.mission_score = 42.0;
+                ON_CALL(*run, run()).WillByDefault(Return(result));
+                return std::unique_ptr<ISimulationRun>(std::move(run));
+            }));
+    }
+
+    SimulationManager manager(std::move(factory), file_paths, ComponentKind::MissionControl);
+
+    SimulationManagerReport report;
+    EXPECT_NO_THROW(report = manager.run(
+        composition, "tests/component/test_output/simulation_manager_test/construction_fails_once"))
+        << "a construction failure on one scenario must not fail the whole component when a later "
+           "scenario still constructs successfully";
+
+    ASSERT_EQ(report.runs.size(), 2u)
+        << "the failed scenario must still produce a run entry, and the later scenario must still "
+           "have been attempted";
+    EXPECT_EQ(report.runs[0].mission_score, -1.0);
+    ASSERT_EQ(report.runs[0].mission_results.size(), 1u);
+    ASSERT_EQ(report.runs[0].mission_results[0].errors.size(), 1u);
+    EXPECT_EQ(report.runs[0].mission_results[0].errors[0].code, "COMPONENT_CONSTRUCTION_FAILED");
+    EXPECT_EQ(report.runs[1].mission_score, 42.0) << "the later, successfully-constructed scenario must still run";
 }
 
 // ── boundary: empty composition ──────────────────────────────────────────────

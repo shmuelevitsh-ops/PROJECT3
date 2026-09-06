@@ -14,7 +14,7 @@
 // the real MissionControlImpl), that test drives the real SimulationRunFactoryImpl with an
 // injected factory (§3's dlopen-plugin architecture), and only the real MissionControlImpl's
 // unconditional output_map_.save() call -- which a bare mock doesn't reproduce -- is what puts
-// map_output.npy on disk for this test to find.
+// the output map file on disk for this test to find.
 
 #include <Simulator/Map3DImpl.h>
 #include <Simulator/MockGPS.h>
@@ -852,9 +852,9 @@ TEST_F(SimulationRun, FactoryBuiltOutputMapOffsetComesFromMissionBoundsNotHidden
 }
 
 TEST_F(SimulationRun, FactoryWritesOutputMapWithNpyExtensionAsAValidArray) {
-    // The factory's fixed per-run filename (kOutputMapFileName) must keep the documented .npy
-    // extension: a bug that drops it would still produce a real, loadable file (only the name is
-    // wrong), so this must check the actual path/extension, not just "a file got written".
+    // The factory's generated per-run filename must keep the documented .npy extension: a bug
+    // that drops it would still produce a real, loadable file (only the name is wrong), so this
+    // must check the actual path/extension, not just "a file got written".
     SimulationConfigData simulation_config;
     simulation_config.map_filename = std::filesystem::path(DATA_MAPS_DIR) / "single_voxel_x4_y4_z4.npy";
     simulation_config.map_resolution = 10.0 * isq::length[cm];

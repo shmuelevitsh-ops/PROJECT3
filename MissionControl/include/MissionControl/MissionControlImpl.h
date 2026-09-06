@@ -4,7 +4,7 @@
 #include <Common/MissionControlFactory.h>
 #include <Common/IMutableMap3D.h>
 #include <Common/Types.h>
-#include <MissionControl/IDroneControl.h>
+#include <MissionControl/DroneControlImpl.h>
 
 #include <filesystem>
 #include <memory>
@@ -20,7 +20,9 @@ public:
 private:
     common::types::MissionConfigData mission_;
     const common::IMutableMap3D& output_map_;
-    std::unique_ptr<mission_control::IDroneControl> drone_control_;
+    // Concrete type (not IDroneControl) so runMission() can query lastStepLog() for verbose
+    // output after each step().
+    std::unique_ptr<DroneControlImpl> drone_control_;
     std::filesystem::path output_map_file_;
     bool verbose_ = false;
 };

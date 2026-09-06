@@ -27,7 +27,7 @@ std::string resultsTimestamp() {
     gmtime_r(&now_time_t, &utc_tm);
 
     std::ostringstream out;
-    out << std::put_time(&utc_tm, "%Y%m%d_%H%M%S");
+    out << std::put_time(&utc_tm, "%Y%m%d%H%M%S");
     return out.str();
 }
 
@@ -45,7 +45,7 @@ std::filesystem::path baseResultsDir(
 }
 
 // Creates the results directory.
-// If the base name already exists, tries suffixes such as _2, _3, and so on.
+// If the base name already exists, tries suffixes such as 2, 3, and so on.
 std::optional<std::filesystem::path> createUniqueResultsDir(
     const std::filesystem::path& base_results_dir) {
 
@@ -66,7 +66,7 @@ std::optional<std::filesystem::path> createUniqueResultsDir(
         }
 
         results_dir = base_results_dir;
-        results_dir += "_" + std::to_string(suffix);
+        results_dir += std::to_string(suffix);
     }
 }
 

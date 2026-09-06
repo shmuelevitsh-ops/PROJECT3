@@ -103,8 +103,9 @@ types::SimulationResult buildErrorResult(const types::SimulationConfigData& simu
 } // namespace
 
 SimulationManager::SimulationManager(std::unique_ptr<ISimulationRunFactory> run_factory,
-                                     CompositionFilePaths file_paths)
-    : run_factory_(std::move(run_factory)), file_paths_(std::move(file_paths)) {
+                                     CompositionFilePaths file_paths, ComponentKind evaluated_component)
+    : run_factory_(std::move(run_factory)), file_paths_(std::move(file_paths)),
+      evaluated_component_(evaluated_component) {
     if (!run_factory_) {
         throw std::invalid_argument("SimulationManager requires a run factory.");
     }
@@ -112,10 +113,28 @@ SimulationManager::SimulationManager(std::unique_ptr<ISimulationRunFactory> run_
 
 // Executes every simulation × mission × drone × lidar combination.
 // Converts run-level failures into -1 results and aggregates all runs into the final report.
+//
+// A ComponentConstructionException from run_factory_->create() means one of the two injected
+// factories (MappingAlgorithm or MissionControl) could not build its plugin instance for that one
+// scenario -- since a factory receives run-specific dependencies, it may fail for one scenario
+// while succeeding for another, so this is still just scored -1 and the composition still
+// continues. Only a failure of evaluated_component_ (the component this SimulationManager is
+// actually evaluating -- MissionControl in comparative mode, MappingAlgorithm in competition mode)
+// counts toward construction_attempts/construction_successes; a failure of the OTHER, fixed/shared
+// component is scored -1 like any other per-run failure but never counted, so it can never cause
+// this component to be misclassified as failed. Only if every attempted construction of
+// evaluated_component_ failed (construction_attempts > 0 && construction_successes == 0) does this
+// function signal a component-level failure at the end, by throwing so the caller (Simulator.cpp's
+// runOneComponent) reports the whole component as failed -- exactly as it already does for any
+// exception out of run(). A composition with no such construction attempts at all (every scenario
+// failed earlier for an unrelated reason, or only the fixed component ever failed) never signals
+// failure.
 types::SimulationManagerReport SimulationManager::run(const types::SimulationCompositionData& composition,
                                                       const std::filesystem::path& output_path) {
     std::vector<types::SimulationResult> runs;
     std::set<std::filesystem::path> used_leaf_dirs;
+    std::size_t construction_attempts = 0;
+    std::size_t construction_successes = 0;
     // Create one run for every simulation × mission × drone × lidar combination.
     for (std::size_t sim_index = 0; sim_index < composition.simulation_mission_groups.size(); ++sim_index) {
         const auto& [simulation, missions] = composition.simulation_mission_groups[sim_index];
@@ -163,19 +182,83 @@ types::SimulationManagerReport SimulationManager::run(const types::SimulationCom
 
                         runs.push_back(buildErrorResult(simulation, mission, *mission_ref.load_error));
                     } else {
-                        // Build and execute this run; convert any per-run failure into a -1 result.
+                        // Build this run's component instance, then execute it; convert any
+                        // per-run failure (including a failed component construction -- see the
+                        // function banner comment) into a -1 result and keep going.
+                        std::unique_ptr<ISimulationRun> run;
+                        bool constructed = false;
                         try {
-                            std::unique_ptr<ISimulationRun> run =
-                                run_factory_->create(simulation, mission, drone, lidar, leaf_dir);
-                            runs.push_back(run->run());
+                            run = run_factory_->create(simulation, mission, drone, lidar, leaf_dir);
+                            constructed = true;
+                        } catch (const ComponentConstructionException& e) {
+                            if (e.kind() == evaluated_component_) {
+                                ++construction_attempts;
+                                std::cerr << "SimulationManager::run: component factory failed to construct its "
+                                            "component, scoring -1: " << e.what() << '\n';
+                                runs.push_back(buildErrorResult(
+                                    simulation, mission,
+                                    common_types::ErrorRef{"COMPONENT_CONSTRUCTION_FAILED", e.what()}));
+                            } else {
+                                // The FIXED/shared component's factory failed, not the one this
+                                // SimulationManager is evaluating -- an ordinary per-run failure
+                                // that must never count toward (or against) classifying this
+                                // evaluated component as failed.
+                                //
+                                // Exception: SimulationRunFactoryImpl::create() always constructs
+                                // MappingAlgorithm before MissionControl (MissionControlDependencies
+                                // embeds the MappingAlgorithm instance), so MissionControl
+                                // construction is only ever reached once MappingAlgorithm has
+                                // already succeeded. In competition mode (evaluating
+                                // MappingAlgorithm, with MissionControl fixed), a fixed
+                                // MissionControl failure therefore proves the evaluated
+                                // MappingAlgorithm did construct successfully for this scenario --
+                                // record that success so a broken fixed MissionControl can never
+                                // masquerade as the evaluated Algorithm having never worked. The
+                                // reverse does not hold in comparative mode: MappingAlgorithm is
+                                // fixed and constructed first, so a fixed MappingAlgorithm failure
+                                // means the evaluated MissionControl was never even reached.
+                                if (evaluated_component_ == ComponentKind::MappingAlgorithm &&
+                                    e.kind() == ComponentKind::MissionControl) {
+                                    ++construction_attempts;
+                                    ++construction_successes;
+                                }
+                                std::cerr << "SimulationManager::run: fixed component factory failed to "
+                                            "construct its component, scoring -1: " << e.what() << '\n';
+                                runs.push_back(buildErrorResult(
+                                    simulation, mission,
+                                    common_types::ErrorRef{"FIXED_COMPONENT_CONSTRUCTION_FAILED", e.what()}));
+                            }
                         } catch (const std::exception& e) {
                             std::cerr << "SimulationManager::run: run failed, scoring -1: " << e.what() << '\n';
                             runs.push_back(buildErrorResult(simulation, mission, e));
+                        }
+
+                        if (constructed) {
+                            ++construction_attempts;
+                            ++construction_successes;
+                            try {
+                                runs.push_back(run->run());
+                            } catch (const std::exception& e) {
+                                std::cerr << "SimulationManager::run: run failed, scoring -1: " << e.what() << '\n';
+                                runs.push_back(buildErrorResult(simulation, mission, e));
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    // Every attempted construction of the evaluated component failed (and at least one was
+    // attempted): the component itself is unusable, not just unlucky on a few scenarios -- signal
+    // that to the caller instead of returning a report full of nothing but construction-failure
+    // placeholders. Failures of the fixed/shared component never reach this counter, so they can
+    // never trigger this.
+    if (construction_attempts > 0 && construction_successes == 0) {
+        throw ComponentConstructionException(
+            evaluated_component_,
+            "SimulationManager::run: every attempted construction of the evaluated component failed (" +
+                std::to_string(construction_attempts) + " attempt(s))");
     }
 
     return types::SimulationManagerReport{composition.composition_file, currentUtcTimestamp(),

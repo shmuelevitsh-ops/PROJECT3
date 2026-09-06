@@ -508,12 +508,13 @@ TEST_F(MissionControl, WithVerboseFlagAnOutputFileIsCreatedWithMissionDetails) {
     // actually ended it (here, DroneControlImpl's plain-Finished message).
     EXPECT_NE(contents.find("output_map=" + output_map_file.string()), std::string::npos);
     EXPECT_NE(contents.find("completion_reason=mapping finished"), std::string::npos);
-    // Logging is event-based, not per-step: a short, error-free 2-step run must not produce a
-    // "step N" line -- those only appear for meaningful events (errors/exceptions/checkpoints).
-    EXPECT_EQ(contents.find("step "), std::string::npos);
+    // Verbose output now has one concise line per DroneControl step, not just start/finish/error
+    // events -- both steps of this 2-step run must appear.
+    EXPECT_NE(contents.find("step 1:"), std::string::npos);
+    EXPECT_NE(contents.find("step 2:"), std::string::npos);
 }
 
-TEST_F(MissionControl, VerboseFlagLogsMeaningfulErrorsAsTheyOccurNotEveryStep) {
+TEST_F(MissionControl, VerboseFlagLogsEveryStepIncludingErrors) {
     const std::filesystem::path dir = freshOutputDir("verbose_errors");
     EXPECT_CALL(algorithm_, nextStep(_, _))
         .WillOnce(Return(workingCommand()))
@@ -527,13 +528,14 @@ TEST_F(MissionControl, VerboseFlagLogsMeaningfulErrorsAsTheyOccurNotEveryStep) {
 
     const std::string contents = readAllFilesIn(dir);
     EXPECT_NE(contents.find("blocked by obstacle"), std::string::npos);
-    // Only the errored step (step 2) is logged -- the plain working step (step 1) is not.
-    EXPECT_NE(contents.find("step 2"), std::string::npos);
-    EXPECT_EQ(contents.find("step 1"), std::string::npos);
+    // Both the plain working step (step 1) and the errored step (step 2) are logged: verbose
+    // output is now one line per step, not just meaningful events.
+    EXPECT_NE(contents.find("step 1:"), std::string::npos);
+    EXPECT_NE(contents.find("step 2:"), std::string::npos);
 }
 
-TEST_F(MissionControl, VerboseFlagLogsACheckpointEvery500StepsInsteadOfEveryStep) {
-    const std::filesystem::path dir = freshOutputDir("verbose_checkpoint");
+TEST_F(MissionControl, VerboseFlagLogsOneLinePerStepForLongRunsWithoutCheckpoints) {
+    const std::filesystem::path dir = freshOutputDir("verbose_long_run");
     constexpr std::size_t kWorkingSteps = 500;
     std::size_t call_count = 0;
     EXPECT_CALL(algorithm_, nextStep(_, _))
@@ -549,10 +551,11 @@ TEST_F(MissionControl, VerboseFlagLogsACheckpointEvery500StepsInsteadOfEveryStep
 
     EXPECT_EQ(result.steps, kWorkingSteps + 1);
     const std::string contents = readAllFilesIn(dir);
-    EXPECT_NE(contents.find("checkpoint: steps=500"), std::string::npos);
-    // Exactly one checkpoint should appear across a 501-step run (only step 500 is a multiple of
-    // the checkpoint interval) -- not one line per step.
-    EXPECT_EQ(contents.find("checkpoint: steps=500"), contents.rfind("checkpoint: steps="));
+    // Checkpoints are gone; every step (first, an interior one, and the last) gets its own line.
+    EXPECT_EQ(contents.find("checkpoint"), std::string::npos);
+    EXPECT_NE(contents.find("step 1:"), std::string::npos);
+    EXPECT_NE(contents.find("step 250:"), std::string::npos);
+    EXPECT_NE(contents.find("step 501:"), std::string::npos);
 }
 
 TEST_F(MissionControl, VerboseFlagDoesNotChangeTheMissionResult) {

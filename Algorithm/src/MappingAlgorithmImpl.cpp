@@ -116,7 +116,6 @@ struct MovementPlan {
 [[nodiscard]] double numDeg(HorizontalAngle v) { return v.force_numerical_value_in(deg); }
 [[nodiscard]] double numDeg(AltitudeAngle v) { return v.force_numerical_value_in(deg); }
 
-// atan2(y, x), converted to degrees.
 [[nodiscard]] double atan2Deg(double y, double x) {
     return std::atan2(y, x) * 180.0 / M_PI;
 }
@@ -189,7 +188,6 @@ struct MovementPlan {
     return std::abs(a.ix - b.ix) + std::abs(a.iy - b.iy) + std::abs(a.iz - b.iz) == 1;
 }
 
-// Preserves the drone's real offset from its voxel center during planning.
 [[nodiscard]] bool hasLineOfSight(const Context& ctx, const VoxelIndex& from, const VoxelIndex& to) {
     const common_types::MapConfig config = ctx.map.getMapConfig();
     const double resolution_cm = numCm(config.resolution);
@@ -220,7 +218,6 @@ struct MovementPlan {
     return true;
 }
 
-// A coarse pre-filter; the LiDAR performs the precise hit test.
 [[nodiscard]] bool isSafeVoxel(const Context& ctx, const VoxelIndex& idx, const Position3D& offset) {
     const common_types::MapConfig config = ctx.map.getMapConfig();
     const Position3D center = toWorldCenter(idx, config) + offset;

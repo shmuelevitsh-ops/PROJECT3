@@ -237,6 +237,7 @@ add_executable(simulator_integration_test
     tests/integration/internal_flow_test.cpp
     tests/integration/full_flow_test.cpp
     tests/integration/audit_errors_test.cpp
+    tests/integration/component_construction_test.cpp
     tests/integration/support/RegistrationStub.cpp
     src/CerrContextGuard.cpp
     src/Map3DImpl.cpp
@@ -275,6 +276,7 @@ target_compile_definitions(simulator_integration_test PRIVATE
     DRONE_MAPPER_SIMULATION_BINARY="$<TARGET_FILE:simulator_322889890_315113738>"
     ALGORITHM_PLUGIN_PATH="$<TARGET_FILE:Algorithm_322889890_315113738>"
     MISSION_CONTROL_PLUGIN_PATH="$<TARGET_FILE:MissionControl_322889890_315113738>"
+    THROWING_MISSION_CONTROL_PLUGIN_PATH="$<TARGET_FILE:throwing_mission_control_test_plugin>"
     TEST_INPUTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_inputs"
     AUDIT_INPUTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/audit_inputs"
     DATA_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/data_maps"
@@ -284,6 +286,31 @@ add_dependencies(simulator_integration_test
     simulator_322889890_315113738
     Algorithm_322889890_315113738
     MissionControl_322889890_315113738
+    throwing_mission_control_test_plugin
 )
 
 drone_warnings(simulator_integration_test)
+
+
+# for tests -- fixture plugin whose MissionControl factory always throws while constructing the
+# instance (component_construction_test.cpp). Mirrors double_mapping_algorithm_test_plugin's build:
+# declares only REGISTER_MISSION_CONTROL and links common::common; dlopen'd at runtime by the
+# spawned simulator_322889890_315113738 binary, which supplies the real
+# common::MissionControlRegistration constructor.
+add_library(throwing_mission_control_test_plugin SHARED
+    tests/integration/support/ThrowingMissionControlPlugin.cpp
+)
+
+set_target_properties(throwing_mission_control_test_plugin PROPERTIES
+    PREFIX ""
+)
+
+target_include_directories(throwing_mission_control_test_plugin PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(throwing_mission_control_test_plugin PRIVATE
+    common::common
+)
+
+drone_warnings(throwing_mission_control_test_plugin)

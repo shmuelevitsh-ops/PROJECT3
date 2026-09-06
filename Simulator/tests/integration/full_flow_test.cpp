@@ -97,6 +97,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #ifndef TEST_INPUTS_DIR
@@ -147,6 +148,16 @@ std::filesystem::path testInputsDir() {
 // every map output lives under "<results_dir>/<this>/simulations/...".
 std::string missionControlStem() {
     return std::filesystem::path(MISSION_CONTROL_PLUGIN_PATH).stem().string();
+}
+
+// Mirrors SimulationRunFactoryImpl's output map filename: <component>__<sim>__<mission>__
+// <drone>__<lidar>.npy, joining the same identifying segments that already name the
+// <component>/simulations/<sim>/<mission>/<drone>__<lidar>/ directory hierarchy.
+std::filesystem::path expectedOutputMapPath(const std::filesystem::path& results_dir, const std::string& sim_stem,
+                                            const std::string& mission_stem, const std::string& drone_lidar_stem) {
+    const std::filesystem::path leaf_dir =
+        results_dir / missionControlStem() / "simulations" / sim_stem / mission_stem / drone_lidar_stem;
+    return leaf_dir / (missionControlStem() + "__" + sim_stem + "__" + mission_stem + "__" + drone_lidar_stem + ".npy");
 }
 
 struct RunOutcome {
@@ -336,12 +347,12 @@ TEST(Integration, RealBenchmarkHouseFullProgramFlowAchievesFullScoreWithinTimeBu
 
     // The documented hierarchy: this run's map must land at exactly this nested path, named from
     // composition_full_house.yaml's real config files -- not a flat or differently-shaped path.
-    const std::filesystem::path expected_map = run.results_dir / missionControlStem() / "simulations" / "sim_full_house" /
-                                               "mission_full_house" / "drone_small__lidar_full_house" /
-                                               "map_output.npy";
+    const std::filesystem::path expected_map =
+        expectedOutputMapPath(run.results_dir, "sim_full_house", "mission_full_house", "drone_small__lidar_full_house");
     EXPECT_TRUE(std::filesystem::exists(expected_map))
         << "expected the full-house run's map at the documented <component>/simulations/<sim>/<mission>/"
-           "<drone>__<lidar>/map_output.npy path, but it is missing: " << expected_map;
+           "<drone>__<lidar>/<component>__<sim>__<mission>__<drone>__<lidar>.npy path, but it is missing: "
+        << expected_map;
 }
 
 // Exercises SimulationManager's nested loop over simulation/mission groups,
@@ -442,16 +453,17 @@ TEST(Integration, YamlDrivenCompositionProducesExpectedSimulationOutput) {
     ASSERT_TRUE(std::filesystem::exists(output_yaml))
         << "simulator_322889890_315113738 did not write this component's simulation_output YAML to: " << output_yaml;
 
-    // The actual point of this output-layout change: every run's map_output.npy must land at the
+    // The actual point of this output-layout change: every run's output map must land at the
     // documented <component>/simulations/<sim>/<mission>/<drone>__<lidar>/ path, named after the
     // real config files composition_basic.yaml references -- not a flat, numerically-indexed file.
-    const std::filesystem::path component_results = run.results_dir / missionControlStem();
-    for (const std::filesystem::path& relative_map :
-         {std::filesystem::path("simulations/sim_1/mission_a/drone_small__lidar_a/map_output.npy"),
-          std::filesystem::path("simulations/sim_1/mission_a/drone_large__lidar_b/map_output.npy"),
-          std::filesystem::path("simulations/sim_2/mission_b/drone_small__lidar_a/map_output.npy"),
-          std::filesystem::path("simulations/sim_2/mission_c/drone_large__lidar_b/map_output.npy")}) {
-        const std::filesystem::path expected_map = component_results / relative_map;
+    for (const auto& [sim_stem, mission_stem, drone_lidar_stem] :
+         std::vector<std::tuple<std::string, std::string, std::string>>{
+             {"sim_1", "mission_a", "drone_small__lidar_a"},
+             {"sim_1", "mission_a", "drone_large__lidar_b"},
+             {"sim_2", "mission_b", "drone_small__lidar_a"},
+             {"sim_2", "mission_c", "drone_large__lidar_b"}}) {
+        const std::filesystem::path expected_map =
+            expectedOutputMapPath(run.results_dir, sim_stem, mission_stem, drone_lidar_stem);
         EXPECT_TRUE(std::filesystem::exists(expected_map))
             << "expected a map at the documented <component>/simulations/<sim>/<mission>/<drone>__<lidar>/ "
                "path, but it is missing: " << expected_map;
@@ -798,10 +810,10 @@ TEST(Integration, BinaryCliInvocationOnRealCompositionProducesDocumentedOutputLa
 
     // composition_multilevel.yaml: sim_3 x mission_d x drone_small x lidar_a = 1 run, so exactly
     // this one path should exist -- the documented <component>/simulations/<sim>/<mission>/
-    // <drone>__<lidar>/map_output.npy layout, named after the real config files, not a flat
-    // numerically-indexed file.
-    const std::filesystem::path expected_map = run.results_dir / missionControlStem() / "simulations" / "sim_3" /
-                                               "mission_d" / "drone_small__lidar_a" / "map_output.npy";
+    // <drone>__<lidar>/<component>__<sim>__<mission>__<drone>__<lidar>.npy layout, named after the
+    // real config files, not a flat numerically-indexed file.
+    const std::filesystem::path expected_map =
+        expectedOutputMapPath(run.results_dir, "sim_3", "mission_d", "drone_small__lidar_a");
     EXPECT_TRUE(std::filesystem::exists(expected_map))
         << "expected the Region C run's map at the documented <component>/simulations/<sim>/<mission>/"
            "<drone>__<lidar>/ path, but it is missing: " << expected_map;

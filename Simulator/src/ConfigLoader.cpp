@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -238,21 +239,43 @@ void parseSimulationMissionGroup(const YAML::Node& sim_entry, const std::filesys
 
 } // namespace
 
-// Entry function
 // Parses the composition YAML and all referenced config files.
 // Skips invalid drone/lidar configs and preserves simulation/mission failures.
 ParsedComposition parseCompositionData(const std::filesystem::path& path) {
     const YAML::Node node = YAML::LoadFile(path.string())["simulation_compositions"];
+    // IsDefined() must be checked before IsMap()/IsSequence(): calling those on a node produced by
+    // indexing a missing key from a const YAML::Node (as below) throws YAML::InvalidNode rather
+    // than reporting false, so the definedness check has to short-circuit first.
+    if (!node || !node.IsMap()) {
+        throw std::runtime_error("parseCompositionData: '" + path.string() +
+                                 "' has no 'simulation_compositions' map");
+    }
+    const YAML::Node simulations_node = node["simulations"];
+    const YAML::Node drone_configs_node = node["drone_configs"];
+    const YAML::Node lidar_configs_node = node["lidar_configs"];
+    if (!simulations_node || !simulations_node.IsSequence()) {
+        throw std::runtime_error("parseCompositionData: '" + path.string() +
+                                 "' is missing the required 'simulations' sequence (an empty list is fine)");
+    }
+    if (!drone_configs_node || !drone_configs_node.IsSequence()) {
+        throw std::runtime_error("parseCompositionData: '" + path.string() +
+                                 "' is missing the required 'drone_configs' sequence (an empty list is fine)");
+    }
+    if (!lidar_configs_node || !lidar_configs_node.IsSequence()) {
+        throw std::runtime_error("parseCompositionData: '" + path.string() +
+                                 "' is missing the required 'lidar_configs' sequence (an empty list is fine)");
+    }
+
     const std::filesystem::path base_dir = path.parent_path();
 
     types::SimulationCompositionData composition;
     composition.composition_file = path;
     CompositionFilePaths file_paths;
 
-    parseConfigList(node["drone_configs"], base_dir, parseDroneConfig, composition.drone_configs, file_paths.drone_paths);
-    parseConfigList(node["lidar_configs"], base_dir, parseLidarConfig, composition.lidar_configs, file_paths.lidar_paths);
+    parseConfigList(drone_configs_node, base_dir, parseDroneConfig, composition.drone_configs, file_paths.drone_paths);
+    parseConfigList(lidar_configs_node, base_dir, parseLidarConfig, composition.lidar_configs, file_paths.lidar_paths);
 
-    for (const YAML::Node& sim_entry : node["simulations"]) {
+    for (const YAML::Node& sim_entry : simulations_node) {
         parseSimulationMissionGroup(sim_entry, base_dir, composition, file_paths);
     }
 

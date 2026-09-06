@@ -7,9 +7,11 @@
 #include <Simulator/SimulationException.h>
 #include <Simulator/SimulationRunImpl.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace simulator {
 
@@ -19,7 +21,33 @@ common::PhysicalLength outputMapResolution(const types::SimulationConfigData& si
 
 namespace {
 
-constexpr const char* kOutputMapFileName = "map_output.npy";
+// Builds a unique, traceable output map filename from the leaf output directory's path
+// segments. SimulationManager encodes the evaluated component, simulation, mission, drone
+// and lidar identity into output_path's directory names (component/simulations/sim/mission/
+// drone__lidar); this reuses that same identity for the filename itself, so a map file stays
+// unique and traceable even if it is ever copied out of its directory. The fixed "simulations"
+// segment carries no identifying information, so it is dropped; only the last four remaining
+// segments are kept.
+std::string uniqueOutputMapFileName(const std::filesystem::path& output_path) {
+    std::vector<std::string> segments;
+    for (const auto& part : output_path) {
+        const std::string segment = part.string();
+        if (segment.empty() || segment == "/" || segment == "simulations") {
+            continue;
+        }
+        segments.push_back(segment);
+    }
+
+    const std::size_t keep = std::min<std::size_t>(4, segments.size());
+    std::string name;
+    for (std::size_t i = segments.size() - keep; i < segments.size(); ++i) {
+        if (!name.empty()) {
+            name += "__";
+        }
+        name += segments[i];
+    }
+    return name + ".npy";
+}
 
 // Builds the hidden-map bounds from its shape, resolution and offset.
 common::types::MapConfig hiddenMapConfig(const types::SimulationConfigData& simulation, const NpyArray::shape_t& shape) {
@@ -59,6 +87,25 @@ common::types::MapConfig outputMapConfig(const types::SimulationConfigData& simu
         outputMapResolution(simulation)};
 }
 
+// Invokes an injected component factory (MappingAlgorithm or MissionControl), translating any
+// exception thrown while constructing the plugin instance into a ComponentConstructionException
+// tagged with which factory it came from. This is what lets SimulationManager tell "this
+// component's factory cannot build a runnable instance" apart from an ordinary per-run failure
+// (e.g. a hidden map that fails to load), and tell the evaluated component's factory apart from
+// the fixed/shared one's -- both can be thrown from within create(), but they mean different
+// things to the caller.
+template <typename Factory, typename Dependencies>
+auto constructComponent(ComponentKind kind, const Factory& factory, Dependencies&& dependencies)
+    -> decltype(factory(std::forward<Dependencies>(dependencies))) {
+    try {
+        return factory(std::forward<Dependencies>(dependencies));
+    } catch (const std::exception& e) {
+        throw ComponentConstructionException(kind, std::string("SimulationRunFactoryImpl::create: ") +
+                                             toString(kind) +
+                                             " factory failed to construct its component: " + e.what());
+    }
+}
+
 } // namespace
 
 SimulationRunFactoryImpl::SimulationRunFactoryImpl(common::MappingAlgorithmFactory mapping_algorithm_factory,
@@ -90,17 +137,21 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
     
     // Project 3: create the mapping algorithm through the injected factory,
     // keeping Simulator independent of the concrete algorithm implementation.
-    auto mapping_algorithm = mapping_algorithm_factory_(
+    auto mapping_algorithm = constructComponent(
+        ComponentKind::MappingAlgorithm, mapping_algorithm_factory_,
         common::MappingAlgorithmDependencies{mission, lidar, drone, *output_map});
 
-    // Each run has its own output directory, so a fixed map filename is good and unique.
+    // Each run has its own output directory, but the filename itself is also made unique and
+    // traceable (component/simulation/mission/drone/lidar), so it survives being copied out.
     std::filesystem::create_directories(output_path);
-    const std::filesystem::path output_map_file = output_path / kOutputMapFileName;
+    const std::filesystem::path output_map_file = output_path / uniqueOutputMapFileName(output_path);
 
     // Project 3: create MissionControl through the injected factory,
     // keeping Simulator independent of the concrete MissionControl implementation.
-    auto mission_control = mission_control_factory_(common::MissionControlDependencies{
-        mission, drone, *lidar_impl, *gps, *movement, *output_map, *mapping_algorithm, output_map_file, verbose_});
+    auto mission_control = constructComponent(
+        ComponentKind::MissionControl, mission_control_factory_,
+        common::MissionControlDependencies{mission, drone, *lidar_impl, *gps, *movement, *output_map,
+                                           *mapping_algorithm, output_map_file, verbose_});
 
     return std::make_unique<SimulationRunImpl>(
         std::move(hidden_map),

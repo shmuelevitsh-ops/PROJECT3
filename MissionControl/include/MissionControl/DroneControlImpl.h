@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <deque>
 #include <optional>
+#include <string>
 
 namespace mission_control_322889890_315113738 {
 
@@ -24,10 +25,18 @@ public:
                      const common::IGPS& gps,
                      common::IDroneMovement& movement,
                      common::IMutableMap3D& output_map,
-                     common::IMappingAlgorithm& mapping_algorithm);
+                     common::IMappingAlgorithm& mapping_algorithm,
+                     bool verbose = false);
 
     [[nodiscard]] common::types::DroneStepResult step() override;
     [[nodiscard]] common::types::DroneState state() const override;
+
+    // Compact, human-readable description of what happened during the most recently completed
+    // step() call (e.g. "Advance 30cm | pos=(180,200,10) | heading=0deg | status=Continue").
+    // Not part of IDroneControl -- verbose logging only, queried by MissionControlImpl after
+    // each step() call. Observational: built entirely from data step() already gathered, no
+    // extra GPS/LiDAR/movement calls.
+    [[nodiscard]] const std::string& lastStepLog() const { return last_step_log_; }
 
 private:
     // Stores pending movement chunks and deferred scan/status for one Algorithm command.
@@ -37,6 +46,12 @@ private:
         common::types::AlgorithmStatus status = common::types::AlgorithmStatus::Working;
         // Heading used to prepare and validate all chunks in this sequence.
         common::Orientation heading;
+        // Whether `heading` above still reflects a genuine gps_.heading() reading. True at
+        // sequence creation (heading is freshly read then); a dispatched Rotate chunk changes
+        // the real heading by an amount this class cannot know without another sensor call, so
+        // it clears this rather than guessing -- verbose logging only, never used to affect
+        // movement/decisions.
+        bool heading_verified = true;
     };
 
     // Validates the pre-step GPS reading; returns a result only when step() must end early.
@@ -59,6 +74,13 @@ private:
         const common::Orientation& scan_orientation, const common::Position3D& post_move_pos,
         const common::Orientation& post_move_heading);
 
+    // Builds and stores the compact verbose-log line for the step() call currently in progress.
+    // `heading` and `scan_hits` are omitted from the line when not meaningful for this step.
+    void recordStepLog(const std::string& action, const common::Position3D& position,
+                       const std::optional<common::Orientation>& heading,
+                       std::optional<std::size_t> scan_hits,
+                       common::types::DroneStepStatus status, const std::string& reason);
+
     common::types::DroneConfigData drone_;
     const common::ILidar& lidar_;
     const common::IGPS& gps_;
@@ -71,6 +93,12 @@ private:
 
     // Internal position estimate used only to validate suspicious GPS readings.
     std::optional<common::Position3D> internal_position_;
+
+    // Verbose-log line for the most recently completed step() call; see lastStepLog().
+    std::string last_step_log_;
+
+    // When false, step() skips all lastStepLog()-related string building entirely.
+    const bool verbose_ = false;
 };
 
 } // namespace mission_control_322889890_315113738

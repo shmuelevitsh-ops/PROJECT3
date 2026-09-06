@@ -327,7 +327,7 @@ void writeCompetitiveReport(const std::filesystem::path& composition_file,
     out << YAML::Key << "competitive_report" << YAML::Value << YAML::BeginMap;
 
     out << YAML::Key << "composition_file" << YAML::Value << YAML::DoubleQuoted << composition_file.string();
-    out << YAML::Key << "mission_control" << YAML::Value << YAML::DoubleQuoted << mission_control.string();
+    out << YAML::Key << "mission_control" << YAML::Value << YAML::DoubleQuoted << mission_control.filename().string();
     out << YAML::Key << "generated_at_utc" << YAML::Value << YAML::DoubleQuoted << currentUtcTimestamp();
 
     blankLineBetweenMapKeys(out);

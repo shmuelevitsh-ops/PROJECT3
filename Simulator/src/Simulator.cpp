@@ -4,6 +4,7 @@
 #include <Simulator/ConfigLoader.h>
 #include <Simulator/ParallelExecutor.h>
 #include <Simulator/Registrar.h>
+#include <Simulator/SimulationException.h>
 #include <Simulator/SimulationManager.h>
 #include <Simulator/SimulationOutputWriter.h>
 #include <Simulator/SimulationRunFactoryImpl.h>
@@ -39,16 +40,20 @@ struct ComponentOutcome {
 
 // Runs one loaded component, writes its output, and stores its totals.
 // On failure, logs the error and leaves outcome.totals empty.
+// evaluated_component says which of the two factories below is the one being compared across
+// components (MissionControl for a comparative run, MappingAlgorithm for a competition run) --
+// SimulationManager uses it to avoid blaming this component for a construction failure in the
+// other, fixed/shared factory.
 void runOneComponent(const std::string& component_name, const std::string& component_stem,
                      const ParsedComposition& parsed, const std::filesystem::path& results_dir,
                      const common::MappingAlgorithmFactory& mapping_algorithm_factory,
                      const common::MissionControlFactory& mission_control_factory, bool verbose,
-                     ComponentOutcome& outcome) {
+                     ComponentKind evaluated_component, ComponentOutcome& outcome) {
     try {
         auto factory_impl = std::make_unique<SimulationRunFactoryImpl>(
             mapping_algorithm_factory, mission_control_factory, verbose);
 
-        SimulationManager manager{std::move(factory_impl), parsed.file_paths};
+        SimulationManager manager{std::move(factory_impl), parsed.file_paths, evaluated_component};
 
         const types::SimulationManagerReport report =
             manager.run(parsed.composition, results_dir / component_stem);
@@ -177,9 +182,11 @@ std::size_t Simulator::runComparative() const {
         // Add this component's name to every error logged by this thread
         const CerrContextGuard component_guard("component=" + component_name);
 
-        // Run the whole composition using the fixed Algorithm and this MissionControl.
+        // Run the whole composition using the fixed Algorithm and this MissionControl. MissionControl
+        // is the component being evaluated here; the Algorithm is fixed/shared.
         runOneComponent(component_name, component_stem, parsed, results_dir_, mapping_algorithm_factory,
-                        loaded.factories[task_index], options.verbose, outcomes[index]);
+                        loaded.factories[task_index], options.verbose, ComponentKind::MissionControl,
+                        outcomes[index]);
     },
     [&](std::size_t task_index, std::exception_ptr exception) {
         // on_failure
@@ -234,9 +241,11 @@ std::size_t Simulator::runCompetition() const {
         // Add this component's name to every error logged by this thread.
         const CerrContextGuard component_guard("component=" + component_name);
 
-        // Run the whole composition using this Algorithm and the fixed MissionControl.
+        // Run the whole composition using this Algorithm and the fixed MissionControl. The Algorithm
+        // is the component being evaluated here; MissionControl is fixed/shared.
         runOneComponent(component_name, component_stem, parsed, results_dir_, loaded.factories[task_index],
-                        mission_control_factory, options.verbose, outcomes[index]);
+                        mission_control_factory, options.verbose, ComponentKind::MappingAlgorithm,
+                        outcomes[index]);
     },
     [&](std::size_t task_index, std::exception_ptr exception) {
         // on_failure

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -27,7 +28,6 @@ using common::z_extent;
 
 namespace {
 
-// DroneStepStatus::Error is recorded but does not terminate the mission.
 constexpr int kMaxBoundaryNudges = 64;
 
 [[nodiscard]] double numCm(common::PhysicalLength v) { return v.force_numerical_value_in(cm); }
@@ -35,10 +35,10 @@ constexpr int kMaxBoundaryNudges = 64;
 // Maximum retries for invalid or NOOP Algorithm commands.
 constexpr int kMaxAlgorithmAttempts = 3;
 
-// Maximum retries for invalid or NOOP Algorithm commands.
+// Maximum retries for an empty LiDAR scan.
 constexpr int kMaxLidarScanAttempts = 3;
 
-// Maximum retries for an empty LiDAR scan.
+// Maximum retries for a failed movement-driver dispatch.
 constexpr int kMaxMovementAttempts = 3;
 
 // Rejects non-finite values in active movement fields.
@@ -262,20 +262,108 @@ constexpr double kSplitToleranceSafetyFactor = 4.0;
     return chunks;
 }
 
+// -- Verbose-log formatting helpers (display only; never influence step() behavior) --
+
+[[nodiscard]] std::string positionToString(const Position3D& p) {
+    std::ostringstream oss;
+    oss << '(' << p.x.force_numerical_value_in(cm) << ',' << p.y.force_numerical_value_in(cm) << ','
+        << p.z.force_numerical_value_in(cm) << ')';
+    return oss.str();
+}
+
+// The real heading accumulates unnormalized (e.g. -720deg after two full left turns) -- valid
+// runtime state that this display-only helper folds into [0, 360) purely for readability.
+[[nodiscard]] double normalizedHeadingDeg(double heading_deg) {
+    double normalized = std::fmod(heading_deg, 360.0);
+    if (normalized < 0.0) {
+        normalized += 360.0;
+    }
+    if (normalized == 0.0) {
+        normalized = 0.0; // avoid printing "-0deg" for an exact multiple of 360
+    }
+    return normalized;
+}
+
+[[nodiscard]] std::string headingToString(const Orientation& heading) {
+    std::ostringstream oss;
+    oss << normalizedHeadingDeg(heading.horizontal.force_numerical_value_in(deg)) << "deg";
+    return oss.str();
+}
+
+[[nodiscard]] std::string movementToString(const common_types::MovementCommand& movement) {
+    std::ostringstream oss;
+    switch (movement.type) {
+        case common_types::MovementCommandType::Hover:
+            oss << "Hover";
+            break;
+        case common_types::MovementCommandType::Rotate:
+            oss << "Rotate "
+                << (movement.rotation == common_types::RotationDirection::Left ? "Left" : "Right")
+                << ' ' << movement.angle.force_numerical_value_in(deg) << "deg";
+            break;
+        case common_types::MovementCommandType::Advance:
+            oss << "Advance " << movement.distance.force_numerical_value_in(cm) << "cm";
+            break;
+        case common_types::MovementCommandType::Elevate:
+            oss << "Elevate " << movement.distance.force_numerical_value_in(cm) << "cm";
+            break;
+    }
+    return oss.str();
+}
+
+[[nodiscard]] std::string scanToString(const Orientation& scan_orientation) {
+    std::ostringstream oss;
+    oss << "Scan h=" << scan_orientation.horizontal.force_numerical_value_in(deg)
+        << "deg a=" << scan_orientation.altitude.force_numerical_value_in(deg) << "deg";
+    return oss.str();
+}
+
+[[nodiscard]] const char* toString(common_types::DroneStepStatus status) {
+    switch (status) {
+        case common_types::DroneStepStatus::Continue: return "Continue";
+        case common_types::DroneStepStatus::Completed: return "Completed";
+        case common_types::DroneStepStatus::Error: return "Error";
+    }
+    return "Unknown";
+}
+
 } // namespace
+
+void DroneControlImpl::recordStepLog(const std::string& action, const Position3D& position,
+                                     const std::optional<Orientation>& heading,
+                                     std::optional<std::size_t> scan_hits,
+                                     common_types::DroneStepStatus status,
+                                     const std::string& reason) {
+    std::ostringstream oss;
+    oss << action;
+    if (scan_hits.has_value()) {
+        oss << " | hits=" << *scan_hits;
+    }
+    oss << " | pos=" << positionToString(position);
+    if (heading.has_value()) {
+        oss << " | heading=" << headingToString(*heading);
+    }
+    oss << " | status=" << toString(status);
+    if (!reason.empty()) {
+        oss << " (" << reason << ")";
+    }
+    last_step_log_ = oss.str();
+}
 
 DroneControlImpl::DroneControlImpl(common_types::DroneConfigData drone,
                                    const common::ILidar& lidar,
                                    const common::IGPS& gps,
                                    common::IDroneMovement& movement,
                                    common::IMutableMap3D& output_map,
-                                   common::IMappingAlgorithm& mapping_algorithm)
+                                   common::IMappingAlgorithm& mapping_algorithm,
+                                   bool verbose)
     : drone_(std::move(drone)),
       lidar_(lidar),
       gps_(gps),
       movement_(movement),
       output_map_(output_map),
-      mapping_algorithm_(mapping_algorithm) {}
+      mapping_algorithm_(mapping_algorithm),
+      verbose_(verbose) {}
 
 DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
     const Position3D& gps_position) {
@@ -326,7 +414,6 @@ DroneControlImpl::PendingMovementSequence DroneControlImpl::prepareNextSequence(
         }
     }
 
-    // Shorten position-changing movements to the largest legal in-bounds distance.
     pending.movements = splitMovement(movement, drone_);
     return pending;
 }
@@ -463,6 +550,10 @@ std::optional<common_types::DroneStepResult> DroneControlImpl::handlePreStepGps(
         }
         // Ignore a bad GPS sample when the internal baseline remains valid.
         ++step_index_;
+        if (verbose_) {
+            recordStepLog("ignored out-of-bounds GPS reading", *internal_position_, std::nullopt,
+                          std::nullopt, common_types::DroneStepStatus::Continue, "");
+        }
         return common_types::DroneStepResult{
             common_types::DroneStepStatus::Continue, "ignored out-of-bounds GPS reading"};
     }
@@ -499,7 +590,27 @@ common_types::DroneStepResult DroneControlImpl::step() {
     if (movement_to_dispatch) {
         const std::optional<common_types::DroneStepResult> movement_error =
             dispatchMovementAndValidateGps(*movement_to_dispatch, pending.heading);
+        // dispatchMovementAndValidateGps only returns (rather than throwing) once the movement
+        // driver has actually executed this chunk -- even when it then reports Error because
+        // post-movement GPS position validation failed. So a Rotate chunk's heading must be
+        // invalidated here, before any logging below, regardless of whether movement_error is
+        // set: once Rotate has actually executed, the old cached heading is never verified
+        // again. A Rotate's real effect on heading depends on the movement driver's own
+        // Left/Right sign convention -- a convention this class must not assume (a different
+        // team's Simulator may invert it) -- so this only clears the cached value rather than
+        // guessing a replacement. Logging-only: no extra sensor read is added here, and
+        // pending.heading itself is left untouched since dispatchMovementAndValidateGps only
+        // uses it for Advance/Elevate direction math, which Rotate chunks never exercise.
+        if (movement_to_dispatch->type == common_types::MovementCommandType::Rotate) {
+            pending.heading_verified = false;
+        }
         if (movement_error.has_value()) {
+            if (verbose_) {
+                recordStepLog(movementToString(*movement_to_dispatch), *internal_position_,
+                              pending.heading_verified ? std::optional<Orientation>(pending.heading)
+                                                        : std::nullopt,
+                              std::nullopt, movement_error->status, movement_error->message);
+            }
             return *movement_error;
         }
     }
@@ -508,29 +619,96 @@ common_types::DroneStepResult DroneControlImpl::step() {
     if (!pending.movements.empty()) {
         ++step_index_;
         latest_scan_ = std::nullopt;
+        if (verbose_) {
+            recordStepLog(movementToString(*movement_to_dispatch), *internal_position_,
+                          pending.heading_verified ? std::optional<Orientation>(pending.heading)
+                                                    : std::nullopt,
+                          std::nullopt, common_types::DroneStepStatus::Continue, "");
+        }
         return common_types::DroneStepResult{
             common_types::DroneStepStatus::Continue, "working"};
     }
 
     const std::optional<Orientation> scan_orientation = pending.scan_orientation;
     const common_types::AlgorithmStatus status = pending.status;
+    const Orientation heading_after_movement = pending.heading;
+    const bool heading_after_movement_verified = pending.heading_verified;
     pending_sequence_.reset();
+
+    // Everything below this point (action/heading/hits) is verbose-log bookkeeping only: it
+    // never feeds back into scan_error/status/position and is skipped entirely when the mission
+    // was not started with -verbose.
+    std::string action;
+    Orientation resulting_heading = heading_after_movement;
+    bool heading_known = heading_after_movement_verified;
+    std::optional<std::size_t> scan_hits;
+    if (verbose_ && movement_to_dispatch) {
+        action = movementToString(*movement_to_dispatch);
+    }
 
     if (scan_orientation.has_value()) {
         // Use the validated post-movement position as the scan origin when movement occurred.
         const Position3D post_move_pos = movement_to_dispatch ? *internal_position_ : gps_position;
         const Orientation post_move_heading = gps_.heading();
+        resulting_heading = post_move_heading;
+        // gps_.heading() was just read above for the scan itself (not an extra call added for
+        // logging), so this is a genuine reading regardless of any earlier unverified Rotate.
+        heading_known = true;
+
+        if (verbose_) {
+            const std::string scan_action = scanToString(*scan_orientation);
+            action = action.empty() ? scan_action : action + " + " + scan_action;
+        }
 
         const std::optional<common_types::DroneStepResult> scan_error =
             dispatchScanAndApplyToMap(*scan_orientation, post_move_pos, post_move_heading);
         if (scan_error.has_value()) {
+            if (verbose_) {
+                recordStepLog(action, post_move_pos, std::nullopt, std::nullopt, scan_error->status,
+                              scan_error->message);
+            }
             return *scan_error;
+        }
+        // dispatchScanAndApplyToMap just refreshed latest_scan_ to the accepted scan on success.
+        if (verbose_) {
+            scan_hits = latest_scan_ ? std::optional<std::size_t>(latest_scan_->size()) : std::nullopt;
         }
     } else {
         latest_scan_ = std::nullopt;
     }
 
     ++step_index_;
+
+    if (verbose_) {
+        if (action.empty()) {
+            action = "no movement/scan";
+        }
+        // Only ever show a heading that was actually read (or provably unchanged since it was
+        // last read): a scan-only step has no fresh movement to attribute a heading to, and a
+        // movement step whose heading is not `heading_known` (an unverified Rotate with no later
+        // scan this call) omits it rather than display a possibly-wrong guess.
+        const std::optional<Orientation> heading_for_log =
+            (movement_to_dispatch && heading_known) ? std::optional<Orientation>(resulting_heading)
+                                                     : std::nullopt;
+        switch (status) {
+            case common_types::AlgorithmStatus::Working:
+                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
+                              common_types::DroneStepStatus::Continue, "");
+                break;
+            case common_types::AlgorithmStatus::Finished:
+                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
+                              common_types::DroneStepStatus::Completed, "mapping finished");
+                break;
+            case common_types::AlgorithmStatus::FinishedWithUnmappableVoxels:
+                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
+                              common_types::DroneStepStatus::Completed, kUnmappableVoxelsMessage);
+                break;
+            default:
+                recordStepLog(action, *internal_position_, heading_for_log, scan_hits,
+                              common_types::DroneStepStatus::Error, "unhandled AlgorithmStatus");
+                break;
+        }
+    }
 
     switch (status) {
         case common_types::AlgorithmStatus::Working:

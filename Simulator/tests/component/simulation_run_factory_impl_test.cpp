@@ -8,7 +8,7 @@
 // supply minimal factories local to this file instead of the real
 // MappingAlgorithmImpl/MissionControlImpl, keeping this Simulator-owned test decoupled
 // from the Algorithm/MissionControl modules -- with one behavior preserved deliberately:
-// these tests assert that map_output.npy exists on disk after run(), which in the real
+// these tests assert that the output map file exists on disk after run(), which in the real
 // pipeline comes from MissionControlImpl::runMission() unconditionally calling
 // output_map_.save(output_map_file_) before returning (MissionControlImpl.cpp), not from
 // anything in SimulationRunFactoryImpl/SimulationRunImpl itself. A pure no-op
@@ -154,11 +154,16 @@ TEST(SimulationRunFactoryImpl, CreateAndRunWritesMapOutputUnderTheGivenNestedOut
         minimalSimulationConfig(), minimalMissionConfig(), minimalDroneConfig(), minimalLidarConfig(), output_path);
     const SimulationResult result = run->run();
 
-    const std::filesystem::path expected_file = output_path / "map_output.npy";
-    EXPECT_TRUE(std::filesystem::exists(expected_file))
+    ASSERT_TRUE(std::filesystem::exists(result.output_map_file))
         << "create()'s previously-nonexistent leaf directory must be created, and the run's map "
-           "saved at a fixed filename inside it";
-    EXPECT_EQ(result.output_map_file, expected_file);
+           "saved inside it";
+    EXPECT_EQ(result.output_map_file.parent_path(), output_path);
+    EXPECT_EQ(result.output_map_file.extension(), ".npy");
+    const std::string filename = result.output_map_file.filename().string();
+    EXPECT_NE(filename.find("sim_x"), std::string::npos) << filename;
+    EXPECT_NE(filename.find("mission_y"), std::string::npos) << filename;
+    EXPECT_NE(filename.find("drone_a"), std::string::npos) << filename;
+    EXPECT_NE(filename.find("lidar_b"), std::string::npos) << filename;
 }
 
 TEST(SimulationRunFactoryImpl, CreateDoesNotDisturbAnExistingSiblingRunsOutputInADifferentDirectory) {
@@ -171,14 +176,16 @@ TEST(SimulationRunFactoryImpl, CreateDoesNotDisturbAnExistingSiblingRunsOutputIn
 
     const std::unique_ptr<ISimulationRun> first_run = factory.create(
         minimalSimulationConfig(), minimalMissionConfig(), minimalDroneConfig(), minimalLidarConfig(), first_dir);
-    first_run->run();
+    const SimulationResult first_result = first_run->run();
     const std::unique_ptr<ISimulationRun> second_run = factory.create(
         minimalSimulationConfig(), minimalMissionConfig(), minimalDroneConfig(), minimalLidarConfig(), second_dir);
-    second_run->run();
+    const SimulationResult second_result = second_run->run();
 
-    EXPECT_TRUE(std::filesystem::exists(first_dir / "map_output.npy"))
+    EXPECT_TRUE(std::filesystem::exists(first_result.output_map_file))
         << "the first run's output must still exist after a second run targets a sibling directory";
-    EXPECT_TRUE(std::filesystem::exists(second_dir / "map_output.npy"));
+    EXPECT_TRUE(std::filesystem::exists(second_result.output_map_file));
+    EXPECT_NE(first_result.output_map_file, second_result.output_map_file)
+        << "sibling runs must get distinct, unique output map filenames";
 }
 
 // ── hidden map load failure: create() must fail, not silently substitute an empty map ──────
@@ -217,6 +224,56 @@ TEST(SimulationRunFactoryImpl, CreateThrowsMapLoadFailedWhenHiddenMapFileIsCorru
         FAIL() << "expected SimulationException for a corrupt hidden map file";
     } catch (const SimulationException& e) {
         EXPECT_EQ(e.code(), "MAP_LOAD_FAILED");
+    }
+}
+
+// ── component factory construction failure: distinct from a per-run failure ────────────────
+//
+// A component's injected factory (MappingAlgorithm or MissionControl) throwing while constructing
+// its plugin instance means the whole component cannot run at all -- unlike a hidden map load
+// failure (above), which is a per-run condition. create() must translate that specific failure
+// into a ComponentConstructionException so SimulationManager can tell the two apart (see
+// SimulationManager.cpp's catch clause ordering and simulation_manager_test.cpp's own coverage).
+
+TEST(SimulationRunFactoryImpl, CreateThrowsComponentConstructionExceptionWhenMissionControlFactoryThrows) {
+    auto throwing_mission_control_factory = [](MissionControlDependencies) -> std::unique_ptr<IMissionControl> {
+        throw std::runtime_error("fixture mission control refuses to be constructed");
+    };
+
+    SimulationRunFactoryImpl factory(noOpMappingAlgorithmFactory(), throwing_mission_control_factory,
+                                     /*verbose=*/false);
+
+    try {
+        static_cast<void>(factory.create(minimalSimulationConfig(), minimalMissionConfig(), minimalDroneConfig(),
+                                         minimalLidarConfig(),
+                                         "out/simulation_run_factory_impl_test/mission_control_throws"));
+        FAIL() << "expected ComponentConstructionException for a MissionControl factory that throws";
+    } catch (const ComponentConstructionException& e) {
+        EXPECT_EQ(e.kind(), ComponentKind::MissionControl)
+            << "must be tagged with the factory that actually failed (MissionControl), not a "
+               "string-parsed guess, so SimulationManager can tell it apart from a MappingAlgorithm "
+               "construction failure";
+    }
+}
+
+TEST(SimulationRunFactoryImpl, CreateThrowsComponentConstructionExceptionWhenMappingAlgorithmFactoryThrows) {
+    auto throwing_mapping_algorithm_factory = [](MappingAlgorithmDependencies) -> std::unique_ptr<IMappingAlgorithm> {
+        throw std::runtime_error("fixture mapping algorithm refuses to be constructed");
+    };
+
+    SimulationRunFactoryImpl factory(throwing_mapping_algorithm_factory, savingMissionControlFactory(),
+                                     /*verbose=*/false);
+
+    try {
+        static_cast<void>(factory.create(minimalSimulationConfig(), minimalMissionConfig(), minimalDroneConfig(),
+                                         minimalLidarConfig(),
+                                         "out/simulation_run_factory_impl_test/mapping_algorithm_throws"));
+        FAIL() << "expected ComponentConstructionException for a MappingAlgorithm factory that throws";
+    } catch (const ComponentConstructionException& e) {
+        EXPECT_EQ(e.kind(), ComponentKind::MappingAlgorithm)
+            << "must be tagged with the factory that actually failed (MappingAlgorithm), not a "
+               "string-parsed guess, so SimulationManager can tell it apart from a MissionControl "
+               "construction failure";
     }
 }
 
@@ -262,13 +319,17 @@ TEST(SimulationRunFactoryImpl, SimulationManagerScoresMissingHiddenMapNegativeOn
     EXPECT_EQ(failed.mission_results[0].steps, 0u);
     ASSERT_EQ(failed.mission_results[0].errors.size(), 1u);
     EXPECT_EQ(failed.mission_results[0].errors[0].code, "MAP_LOAD_FAILED");
-    EXPECT_FALSE(std::filesystem::exists(output_path / "simulations" / "sim_0" / "mission_0_0" / "drone_0__lidar_0" /
-                                         "map_output.npy"))
+    EXPECT_TRUE(failed.output_map_file.empty())
         << "SimulationRunImpl::run() must never execute for a combination whose hidden map failed to load";
 
     const SimulationResult& sibling = report.runs[1];
     EXPECT_NE(sibling.mission_score, -1.0) << "an independent sibling simulation must still run normally";
-    EXPECT_TRUE(std::filesystem::exists(output_path / "simulations" / "sim_1" / "mission_1_0" / "drone_0__lidar_0" /
-                                        "map_output.npy"))
+    ASSERT_FALSE(sibling.output_map_file.empty());
+    EXPECT_TRUE(std::filesystem::exists(sibling.output_map_file))
         << "the sibling simulation's run must have executed and saved its output map";
+    const std::string sibling_filename = sibling.output_map_file.filename().string();
+    EXPECT_NE(sibling_filename.find("sim_1"), std::string::npos) << sibling_filename;
+    EXPECT_NE(sibling_filename.find("mission_1_0"), std::string::npos) << sibling_filename;
+    EXPECT_NE(sibling_filename.find("drone_0"), std::string::npos) << sibling_filename;
+    EXPECT_NE(sibling_filename.find("lidar_0"), std::string::npos) << sibling_filename;
 }
