@@ -115,6 +115,47 @@ DroneState applyMovement(DroneState state, const std::optional<MovementCommand>&
     return state;
 }
 
+// Like applyMovement(), but models a Simulator/MissionControl using the OPPOSITE rotation-sign
+// convention (Rotate Left -> negative heading change, Rotate Right -> positive) -- the mirror
+// image of this codebase's own convention above. Used only by the dedicated calibration test that
+// verifies the algorithm detects and compensates for such a flipped environment.
+DroneState applyMovementFlipped(DroneState state, const std::optional<MovementCommand>& movement) {
+    if (movement && movement->type == MovementCommandType::Rotate) {
+        const HorizontalAngle signed_angle =
+            movement->rotation == RotationDirection::Left ? -movement->angle : movement->angle;
+        state.heading.horizontal = state.heading.horizontal + signed_angle;
+        return state;
+    }
+    return applyMovement(state, movement);
+}
+
+// Drives `algorithm` through the mandatory 2-step rotation-sign calibration (see
+// MappingAlgorithmImpl::Impl::calibrationStep) so callers can then assert on the first "real"
+// nextStep() call exactly as before calibration was introduced. This harness's own
+// applyMovement() always treats Left as a positive heading change, so calibration deterministically
+// detects that convention on the first probe and returns the drone to its original heading (and,
+// since only Rotate commands are issued during calibration, its original position too).
+DroneState passCalibration(MappingAlgorithmImpl& algorithm, DroneState state) {
+    // Note: plain EXPECT_* (not ASSERT_*) throughout, since ASSERT_* cannot be used in a function
+    // that returns a value; applyMovement() tolerates a missing movement (leaves state unchanged)
+    // so a failed expectation here still lets the calling test proceed and report its own failure.
+    const MappingStepCommand probe = algorithm.nextStep(state, nullptr);
+    EXPECT_TRUE(probe.movement.has_value() && probe.movement->type == MovementCommandType::Rotate)
+        << "expected the first nextStep() call to be the rotation-sign calibration probe";
+    EXPECT_FALSE(probe.scan_orientation.has_value()) << "calibration must not scan";
+    state = applyMovement(state, probe.movement);
+    state.step_index += 1;
+
+    const MappingStepCommand recover = algorithm.nextStep(state, nullptr);
+    EXPECT_TRUE(recover.movement.has_value() && recover.movement->type == MovementCommandType::Rotate)
+        << "expected the second nextStep() call to be the calibration return-to-H0 rotation";
+    EXPECT_FALSE(recover.scan_orientation.has_value()) << "calibration must not scan";
+    state = applyMovement(state, recover.movement);
+    state.step_index += 1;
+
+    return state;
+}
+
 // Drives `algorithm` until it reports a non-Working status or `max_iterations` is exceeded.
 // The map is never updated from `latest_scan` (no real ScanResultToVoxels in these component
 // tests) - callers that need scans to resolve must update the injected map directly.
@@ -360,7 +401,8 @@ TEST(MappingAlgorithm, DoesNotAdvanceIntoOccupiedForwardVoxel) {
     map->set(voxelCenter(1, 0, 0), VoxelOccupancy::Occupied);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value())
@@ -372,7 +414,8 @@ TEST(MappingAlgorithm, DoesNotAdvanceIntoUnmappedForwardVoxel) {
     const auto map = freshMap(map_config); // forward voxel is Unmapped by default.
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value());
@@ -386,7 +429,8 @@ TEST(MappingAlgorithm, DoesNotAdvanceIntoPotentiallyOccupiedForwardVoxel) {
     map->set(voxelCenter(1, 0, 0), VoxelOccupancy::PotentiallyOccupied);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value());
@@ -408,7 +452,8 @@ TEST(MappingAlgorithm, BlockedSweepCandidateIsScannedDirectlyBeforeFallingThroug
     const auto map = freshMap(map_config); // every cell Unmapped by default.
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     ASSERT_FALSE(command.movement.has_value())
@@ -427,7 +472,8 @@ TEST(MappingAlgorithm, ChunkedAdvanceSumsToOneResolutionStep) {
     drone.max_advance = 5.0 * isq::length[cm]; // half of the 10cm resolution step.
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
 
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand first = algorithm.nextStep(state, nullptr);
     ASSERT_TRUE(first.movement.has_value());
@@ -458,7 +504,8 @@ TEST(MappingAlgorithm, AdvanceWithMaxAdvanceAtLeastResolutionMovesInASingleStep)
     drone.max_advance = 10.0 * isq::length[cm]; // == the 10cm resolution step, not less than it.
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
 
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
     ASSERT_TRUE(command.movement.has_value());
@@ -500,19 +547,152 @@ TEST(MappingAlgorithm, ChunkedRotateSumsToRequiredTurn) {
     EXPECT_NEAR(std::fabs(total_signed_deg), 90.0, 1e-3);
 }
 
+// --- Rotation-sign calibration ------------------------------------------------------------------
+
+TEST(MappingAlgorithm, CalibrationDetectsAndCompensatesForAFlippedRotationConvention) {
+    // Every other test in this file runs under this codebase's own rotation convention (Left ->
+    // positive heading change, modeled by applyMovement()), so calibration always detects
+    // left_is_positive=true and every fix above that inserts passCalibration() is exercising only
+    // that one branch. This test drives the algorithm with applyMovementFlipped() instead -- the
+    // mirror-image convention a different team's Simulator/MissionControl could use -- to verify
+    // calibration also detects and compensates for that case, ending with the drone truly facing
+    // the correct real-world direction rather than merely being internally self-consistent.
+    const auto map_config = gridConfig(5);
+    const auto map = freshMap(map_config);
+    map->set(voxelCenter(1, 0, 0), VoxelOccupancy::Empty); // due east of the start cell.
+    MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
+
+    // Starts facing north (90deg); the first Sweep move is always due east (see initSweepBounds),
+    // so reaching it requires a real-world 90deg turn from north to east.
+    DroneState state{voxelCenter(0, 0, 0), Orientation{90.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, 0};
+
+    const MappingStepCommand probe = algorithm.nextStep(state, nullptr);
+    ASSERT_TRUE(probe.movement.has_value() && probe.movement->type == MovementCommandType::Rotate);
+    EXPECT_EQ(probe.movement->rotation, RotationDirection::Left)
+        << "the calibration probe itself is always a raw Rotate Left, regardless of environment";
+    state = applyMovementFlipped(state, probe.movement);
+
+    const MappingStepCommand recover = algorithm.nextStep(state, nullptr);
+    ASSERT_TRUE(recover.movement.has_value() && recover.movement->type == MovementCommandType::Rotate);
+    EXPECT_EQ(recover.movement->rotation, RotationDirection::Right)
+        << "the probe measured a negative heading change under this flipped convention (Left is "
+           "negative here), so undoing it (a positive real-world change) must be issued as Right";
+    state = applyMovementFlipped(state, recover.movement);
+    EXPECT_NEAR(state.heading.horizontal.force_numerical_value_in(deg), 90.0, 1e-6)
+        << "calibration must return the drone to its original heading";
+
+    // Drain the (possibly chunked) real turn toward due east, verifying every Rotate command is
+    // now issued as the convention-flipped choice.
+    bool saw_advance = false;
+    for (int i = 0; i < 10 && !saw_advance; ++i) {
+        const MappingStepCommand command = algorithm.nextStep(state, nullptr);
+        ASSERT_TRUE(command.movement.has_value());
+        if (command.movement->type == MovementCommandType::Rotate) {
+            EXPECT_EQ(command.movement->rotation, RotationDirection::Left)
+                << "turning from north to east is a negative (clockwise) heading change; under "
+                   "this codebase's own convention that would be Right, but under this flipped "
+                   "environment it must be issued as Left instead to produce that same negative "
+                   "real-world change";
+        } else {
+            EXPECT_EQ(command.movement->type, MovementCommandType::Advance);
+            saw_advance = true;
+        }
+        state = applyMovementFlipped(state, command.movement);
+    }
+
+    EXPECT_TRUE(saw_advance) << "expected the rotation to eventually be followed by the advance east";
+    EXPECT_NEAR(state.heading.horizontal.force_numerical_value_in(deg), 0.0, 1.0)
+        << "despite the flipped convention, the drone must end up truly facing east (0deg) in the "
+           "real world -- proving the compensation was correct, not merely self-consistent";
+}
+
+TEST(MappingAlgorithm, CalibrationRecoveryChunksWhenMeasuredChangeExceedsMaxRotate) {
+    // The recovery rotation is sized off the *actual measured* heading change, not the requested
+    // probe angle -- normally the same small value, but an unusual runtime/retry case could still
+    // measure something larger than max_rotate. max_rotate bounds a single command's magnitude, so
+    // the recovery must then split into multiple chunked Rotate commands (like any other
+    // planner-issued rotation), never one oversized command, and no Advance/Elevate/Scan may occur
+    // until every chunk is drained. This test forces that scenario directly, independent of
+    // whatever angle the probe itself requested, by applying a deliberately large heading change
+    // after the probe -- modeling a misbehaving/retry-heavy environment.
+    constexpr double kMaxRotateDeg = 10.0;
+    const auto map_config = gridConfig(5);
+    const auto map = freshMap(map_config);
+    map->set(voxelCenter(1, 0, 0), VoxelOccupancy::Empty);
+    const auto drone = customDroneConfig(/*radius_cm=*/1.0, kMaxRotateDeg, /*max_advance_cm=*/5.0, 5.0);
+    MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
+
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    const double h0_deg = state.heading.horizontal.force_numerical_value_in(deg);
+
+    const MappingStepCommand probe = algorithm.nextStep(state, nullptr);
+    ASSERT_TRUE(probe.movement.has_value() && probe.movement->type == MovementCommandType::Rotate);
+    EXPECT_LE(probe.movement->angle.force_numerical_value_in(deg), kMaxRotateDeg + 1e-6)
+        << "the probe itself must also respect max_rotate";
+
+    // Simulate a measured change (37deg) larger than max_rotate (10deg), regardless of the small
+    // angle actually requested above.
+    constexpr double kForcedMeasuredDiffDeg = 37.0;
+    state.heading.horizontal = state.heading.horizontal + kForcedMeasuredDiffDeg * horizontal_angle[deg];
+
+    std::vector<double> recovery_chunk_deg;
+    std::optional<RotationDirection> recovery_direction;
+    MappingStepCommand command;
+    for (int i = 0; i < 10; ++i) {
+        command = algorithm.nextStep(state, nullptr);
+        ASSERT_TRUE(command.movement.has_value());
+        ASSERT_EQ(command.movement->type, MovementCommandType::Rotate)
+            << "no Advance/Elevate/Scan may occur until every recovery chunk is drained";
+        EXPECT_FALSE(command.scan_orientation.has_value());
+        EXPECT_LE(command.movement->angle.force_numerical_value_in(deg), kMaxRotateDeg + 1e-6)
+            << "every recovery chunk must individually respect max_rotate";
+        if (!recovery_direction) {
+            recovery_direction = command.movement->rotation;
+        } else {
+            EXPECT_EQ(command.movement->rotation, *recovery_direction)
+                << "a single signed recovery must not flip direction across its own chunks";
+        }
+        recovery_chunk_deg.push_back(command.movement->angle.force_numerical_value_in(deg));
+        state = applyMovement(state, command.movement);
+        // The chunk that lands exactly back on H0 is the last recovery command; everything after
+        // it is normal post-calibration algorithm behavior. (h0_deg is 0 and the forced diff below
+        // 180deg, so a plain difference -- no angle wraparound -- correctly detects arrival.)
+        if (std::fabs(state.heading.horizontal.force_numerical_value_in(deg) - h0_deg) < 1e-6) {
+            break;
+        }
+    }
+
+    ASSERT_GE(recovery_chunk_deg.size(), 2u)
+        << "37deg of recovery at max_rotate=10deg must split into more than one Rotate command";
+    EXPECT_EQ(recovery_direction, RotationDirection::Right)
+        << "undoing a positive 37deg measured change under this codebase's own (unflipped) "
+           "convention must be issued as Right";
+    double total_deg = 0.0;
+    for (const double piece_deg : recovery_chunk_deg) {
+        total_deg += piece_deg;
+    }
+    EXPECT_NEAR(total_deg, kForcedMeasuredDiffDeg, 1e-6)
+        << "the recovery chunks must sum to the actual measured change (37deg), not merely the "
+           "originally requested probe angle";
+    EXPECT_NEAR(state.heading.horizontal.force_numerical_value_in(deg), h0_deg, 1e-6)
+        << "after every recovery chunk, the drone must be back at its original heading";
+}
+
 TEST(MappingAlgorithm, ScanOrientationIsRelativeToHeadingNotAbsolute) {
     const auto map_config = gridConfig(5);
 
     const auto map_zero = freshMap(map_config);
     MappingAlgorithmImpl algorithm_zero(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map_zero});
-    const DroneState state_zero{voxelCenter(0, 0, 0), Orientation{0.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, 0};
+    DroneState state_zero{voxelCenter(0, 0, 0), Orientation{0.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, 0};
+    state_zero = passCalibration(algorithm_zero, state_zero);
     const MappingStepCommand command_zero = algorithm_zero.nextStep(state_zero, nullptr);
     ASSERT_TRUE(command_zero.scan_orientation.has_value());
 
     const auto map_rotated = freshMap(map_config);
     MappingAlgorithmImpl algorithm_rotated(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map_rotated});
-    const DroneState state_rotated{voxelCenter(0, 0, 0),
-                                    Orientation{90.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, 0};
+    DroneState state_rotated{voxelCenter(0, 0, 0),
+                              Orientation{90.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]}, 0};
+    state_rotated = passCalibration(algorithm_rotated, state_rotated);
     const MappingStepCommand command_rotated = algorithm_rotated.nextStep(state_rotated, nullptr);
     ASSERT_TRUE(command_rotated.scan_orientation.has_value());
 
@@ -528,7 +708,8 @@ TEST(MappingAlgorithm, OutputMapIsAuthoritativeOverPreviousScanRequest) {
     const auto map_config = gridConfig(5);
     const auto map = freshMap(map_config);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
-    const DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenter(0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand first = algorithm.nextStep(state, nullptr);
     ASSERT_TRUE(first.scan_orientation.has_value()) << "forward voxel starts Unmapped, so a scan is expected";
@@ -635,7 +816,8 @@ TEST(MappingAlgorithm, SphereSafetyRejectsEmptyCandidateWithOccupiedNeighborInRa
     const auto drone = customDroneConfig(/*radius_cm=*/12.0, 30.0, 5.0, 5.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
 
-    const DroneState state{voxelCenterIn(map->getMapConfig(), 3, 3, 3), Orientation{}, 0};
+    DroneState state{voxelCenterIn(map->getMapConfig(), 3, 3, 3), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value())
@@ -648,7 +830,8 @@ TEST(MappingAlgorithm, SphereSafetyRejectsEmptyCandidateWithUnmappedNeighborInRa
     const auto drone = customDroneConfig(12.0, 30.0, 5.0, 5.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
 
-    const DroneState state{voxelCenterIn(map->getMapConfig(), 3, 3, 3), Orientation{}, 0};
+    DroneState state{voxelCenterIn(map->getMapConfig(), 3, 3, 3), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value())
@@ -661,7 +844,8 @@ TEST(MappingAlgorithm, SphereSafetyRejectsEmptyCandidateWithPotentiallyOccupiedN
     const auto drone = customDroneConfig(12.0, 30.0, 5.0, 5.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
 
-    const DroneState state{voxelCenterIn(map->getMapConfig(), 3, 3, 3), Orientation{}, 0};
+    DroneState state{voxelCenterIn(map->getMapConfig(), 3, 3, 3), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value())
@@ -845,7 +1029,8 @@ TEST(MappingAlgorithm, NonZeroOffsetForwardOccupiedVoxelBlocksMovement) {
     map->set(voxelCenterIn(config, 1, 0, 0), VoxelOccupancy::Occupied);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value())
@@ -858,7 +1043,8 @@ TEST(MappingAlgorithm, NonZeroOffsetScanOrientationStillPointsAtForwardTarget) {
     auto map = freshMap(config); // forward voxel stays Unmapped.
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     ASSERT_TRUE(command.scan_orientation.has_value());
@@ -878,6 +1064,7 @@ TEST(MappingAlgorithm, NonDefaultResolutionChunkedAdvanceSumsToResolutionStep) {
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), drone, *map});
 
     DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     double total_cm = 0.0;
     for (int i = 0; i < 10; ++i) {
         const MappingStepCommand command = algorithm.nextStep(state, nullptr);
@@ -901,7 +1088,8 @@ TEST(MappingAlgorithm, NonDefaultResolutionSafetyStillBlocksOccupiedForwardVoxel
     map->set(voxelCenterIn(config, 1, 0, 0), VoxelOccupancy::Occupied);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), lidarConfig(), droneConfig(), *map});
 
-    const DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
     EXPECT_FALSE(command.movement.has_value())
@@ -1043,7 +1231,8 @@ TEST(MappingAlgorithm, FrontierBfsCanDescendInZToReachATarget) {
                                           /*max_elevate_cm=*/10.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{
         missionConfig(), customLidarConfig(/*z_min=*/5.0, /*z_max=*/15.0), drone, *map});
-    const DroneState state{voxelCenterIn(config, 0, 0, 2), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 2), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -1162,7 +1351,8 @@ TEST(MappingAlgorithm, PotentiallyOccupiedVoxelOnLineOfSightDoesNotBlockTargetin
     const auto drone = customDroneConfig(/*radius_cm=*/1.0, 90.0, 100.0, 100.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{
         missionConfig(), customLidarConfig(/*z_min=*/15.0, /*z_max=*/100.0), drone, *map});
-    const DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -1206,7 +1396,8 @@ TEST(MappingAlgorithm, LocalSweepTurnsToTheNextYLaneInsteadOfDetouringToFrontier
                                           /*max_advance_cm=*/50.0, /*max_elevate_cm=*/50.0);
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
-    const DroneState state{vc(0, 0), Orientation{}, 0};
+    DroneState state{vc(0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -1547,7 +1738,8 @@ TEST(MappingAlgorithm, FrontierCombinesMergedAdvanceRunWithScanInOneStep) {
                                           /*max_advance_cm=*/50.0, /*max_elevate_cm=*/50.0);
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
-    const DroneState state{voxelCenterIn(config, 0, 6, 0), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 6, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand rotate_cmd = algorithm.nextStep(state, nullptr);
     ASSERT_TRUE(rotate_cmd.movement.has_value());
@@ -1599,6 +1791,7 @@ TEST(MappingAlgorithm, FrontierAttachesScanOnlyToTheFinalChunkOfAMergedAdvanceRu
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
     DroneState state{voxelCenterIn(config, 0, 6, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand rotate_cmd = algorithm.nextStep(state, nullptr);
     ASSERT_TRUE(rotate_cmd.movement.has_value());
@@ -1656,7 +1849,8 @@ TEST(MappingAlgorithm, FrontierCombinesMergedElevateRunWithScanInOneStep) {
                                           /*max_elevate_cm=*/50.0);
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
-    const DroneState state{voxelCenterIn(config, 0, 0, 6), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 6), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -1690,6 +1884,7 @@ TEST(MappingAlgorithm, ResolvePendingScanWorksAfterACombinedMovementAndScanStep)
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
     DroneState state{voxelCenterIn(config, 0, 6, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand rotate_cmd = algorithm.nextStep(state, nullptr);
     state = applyMovement(state, rotate_cmd.movement);
@@ -1739,6 +1934,7 @@ TEST(MappingAlgorithm, SweepPipelinesScanOfNextCandidateOntoTheMoveIntoTheCurren
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
     DroneState state{vc(0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     // Step 1: candidate A (ix=1) is Unmapped -- Sweep must scan it directly, with no movement (it
     // is not yet known safe to enter -- "never move into an unknown/unverified voxel").
@@ -1800,6 +1996,7 @@ TEST(MappingAlgorithm, SweepDoesNotAttachAScanWhenTheCandidateAfterTheBatchIsNot
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
     DroneState state{vc(0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand scan_a = algorithm.nextStep(state, nullptr);
     ASSERT_FALSE(scan_a.movement.has_value());
@@ -1856,6 +2053,7 @@ TEST(MappingAlgorithm, FrontierCombinedScanOrientationReflectsPostMovementPositi
     // entire volume on the very first call (see the column tests above) and every command below
     // comes from Frontier.
     DroneState state{vc(4, 4), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand rotate_cmd = algorithm.nextStep(state, nullptr);
     ASSERT_TRUE(rotate_cmd.movement.has_value());
@@ -1941,6 +2139,7 @@ TEST(MappingAlgorithm, FrontierMergedAdvanceStopsAtADirectionChangeThenResumesMe
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 12.0), drone, *map});
     DroneState state{vc(4, 4), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     std::vector<double> advance_distances_cm;
     bool saw_scan = false;
@@ -1993,7 +2192,8 @@ TEST(MappingAlgorithm, SweepBatchesConsecutiveCandidatesIntoOneMergedAdvanceAndA
                                           /*max_advance_cm=*/50.0, /*max_elevate_cm=*/50.0);
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
-    const DroneState state{vc(0), Orientation{}, 0};
+    DroneState state{vc(0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -2031,6 +2231,7 @@ TEST(MappingAlgorithm, SweepBatchedLegIsChunkedWhenItExceedsMaxAdvance) {
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
     DroneState state{vc(0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     std::vector<double> advance_distances_cm;
     std::vector<bool> had_scan;
@@ -2079,7 +2280,8 @@ TEST(MappingAlgorithm, SweepBatchingStopsBeforeACandidateThatFailsTheSafetyCheck
                                           /*max_advance_cm=*/50.0, /*max_elevate_cm=*/50.0);
     MappingAlgorithmImpl algorithm(
         MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 15.0), drone, *map});
-    const DroneState state{vc(0, 4, 4), Orientation{}, 0};
+    DroneState state{vc(0, 4, 4), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -2112,7 +2314,8 @@ TEST(MappingAlgorithm, SweepBatchingDoesNotCrossARowPivotOrLayerTransition) {
 
     const auto drone = customDroneConfig(/*radius_cm=*/1.0, 90.0, /*max_advance_cm=*/100.0, 100.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 50.0), drone, *map});
-    const DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     const MappingStepCommand command = algorithm.nextStep(state, nullptr);
 
@@ -2263,6 +2466,7 @@ TEST(MappingAlgorithm, SweepBatchingTreatsARowPivotAsItsOwnStepThenBatchesTheRes
                                           /*max_advance_cm=*/100.0, /*max_elevate_cm=*/100.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 50.0), drone, *map});
     DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     // Command 1: row y=0's batch (3 cells past the start).
     const MappingStepCommand row0_batch = algorithm.nextStep(state, nullptr);
@@ -2331,6 +2535,7 @@ TEST(MappingAlgorithm, SweepBatchingTreatsALayerTransitionAsItsOwnStepThenBatche
                                           /*max_advance_cm=*/100.0, /*max_elevate_cm=*/100.0);
     MappingAlgorithmImpl algorithm(MappingAlgorithmDependencies{missionConfig(), customLidarConfig(5.0, 50.0), drone, *map});
     DroneState state{voxelCenterIn(config, 0, 0, 0), Orientation{}, 0};
+    state = passCalibration(algorithm, state);
 
     // Command 1: layer z=0's row batch (3 cells past the start).
     const MappingStepCommand layer0_batch = algorithm.nextStep(state, nullptr);

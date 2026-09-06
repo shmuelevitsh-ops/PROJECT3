@@ -41,6 +41,10 @@ constexpr double kAngleEpsilonDeg = 1e-6;
 constexpr double kDistanceEpsilonCm = 1e-6;
 // Sampling step for the line-of-sight pre-filter.
 constexpr double kLineOfSightSampleStepFraction = 0.5;
+// Rotation-sign calibration: probe angle for the initial Rotate Left, and the minimum measured
+// heading change below which the result is treated as inconclusive (retry rather than guess).
+constexpr double kCalibrationProbeAngleDeg = 5.0;
+constexpr double kCalibrationZeroToleranceDeg = 1e-3;
 
 // Discrete map-grid coordinates.
 struct VoxelIndex {
@@ -84,6 +88,9 @@ struct FrontierTargetPairHash {
 };
 
 enum class Phase { Sweep, Frontier, Done };
+
+// Rotation-sign calibration progress (see MappingAlgorithmImpl::Impl::calibrationStep).
+enum class CalibrationState { NotStarted, AwaitingMeasurement, Done };
 
 // Groups the algorithm's read-only dependencies.
 struct Context {
@@ -283,22 +290,30 @@ struct MovementPlan {
     return pieces;
 }
 
+// Converts a signed logical angle (positive meaning an increasing/positive numeric heading
+// change, e.g. as normalizeDeg()/atan2Deg() already compute it) into a single Rotate command,
+// honoring the runtime-detected sign convention: this is the only place a signed angle becomes a
+// concrete Left/Right choice, so this is where a flipped-convention environment must be
+// compensated for -- Left/Right is exactly what is runtime-dependent, not the sign of the angle
+// itself. `left_is_positive` is what calibration determined: true if this environment's Rotate
+// Left produces a positive heading change, false if it is reversed.
+[[nodiscard]] common_types::MovementCommand makeRotateCommand(double signed_angle_deg, bool left_is_positive) {
+    common_types::MovementCommand cmd;
+    cmd.type = common_types::MovementCommandType::Rotate;
+    cmd.rotation = ((signed_angle_deg >= 0.0) == left_is_positive) ? common_types::RotationDirection::Left
+                                                                    : common_types::RotationDirection::Right;
+    cmd.angle = std::fabs(signed_angle_deg) * horizontal_angle[deg];
+    return cmd;
+}
+
 // Appends Rotate commands summing to `signed_angle_deg`, each within `max_rotate_deg`.
 void pushChunkedRotate(std::deque<common_types::MovementCommand>& queue, double signed_angle_deg,
-                        double max_rotate_deg) {
+                        double max_rotate_deg, bool left_is_positive) {
     const std::vector<double> pieces =
         splitMagnitude(std::fabs(signed_angle_deg), max_rotate_deg, kAngleEpsilonDeg);
-    if (pieces.empty()) {
-        return;
-    }
-    const common_types::RotationDirection direction =
-        signed_angle_deg >= 0.0 ? common_types::RotationDirection::Left : common_types::RotationDirection::Right;
+    const double sign = signed_angle_deg >= 0.0 ? 1.0 : -1.0;
     for (const double piece_deg : pieces) {
-        common_types::MovementCommand cmd;
-        cmd.type = common_types::MovementCommandType::Rotate;
-        cmd.rotation = direction;
-        cmd.angle = piece_deg * horizontal_angle[deg];
-        queue.push_back(cmd);
+        queue.push_back(makeRotateCommand(sign * piece_deg, left_is_positive));
     }
 }
 
@@ -334,7 +349,8 @@ void pushChunkedElevate(std::deque<common_types::MovementCommand>& queue, double
 
 // Converts a validated voxel path into bounded movement commands, merging consecutive runs.
 [[nodiscard]] MovementPlan buildMovementQueue(const Context& ctx, const Orientation& start_heading,
-                                               const VoxelIndex& start, const std::vector<VoxelIndex>& path) {
+                                               const VoxelIndex& start, const std::vector<VoxelIndex>& path,
+                                               bool left_is_positive) {
     MovementPlan plan;
     const double resolution_cm = numCm(ctx.map.getMapConfig().resolution);
     const double max_rotate_deg = numDeg(ctx.drone.max_rotate);
@@ -368,7 +384,7 @@ void pushChunkedElevate(std::deque<common_types::MovementCommand>& queue, double
                 atan2Deg(static_cast<double>(dir_y), static_cast<double>(dir_x));
             const double diff_deg = normalizeDeg(target_heading_deg - heading_deg);
             if (std::fabs(diff_deg) > kAngleEpsilonDeg) {
-                pushChunkedRotate(plan.commands, diff_deg, max_rotate_deg);
+                pushChunkedRotate(plan.commands, diff_deg, max_rotate_deg, left_is_positive);
                 heading_deg = normalizeDeg(heading_deg + diff_deg);
             }
             const double run_distance_cm =
@@ -406,6 +422,13 @@ struct MappingAlgorithmImpl::Impl {
     Phase phase = Phase::Sweep;
     std::deque<common_types::MovementCommand> pending_moves{};
 
+    // Runtime rotation-sign calibration: another team's Simulator/MissionControl may interpret
+    // Rotate Left/Right with the opposite heading-change sign from ours. Must complete (Rotate
+    // commands only, no Advance/Elevate/Scan) before any normal Sweep/Frontier movement.
+    CalibrationState calibration_state = CalibrationState::NotStarted;
+    double calibration_start_heading_deg = 0.0;
+    bool left_is_positive = true;
+
     // Frontier bookkeeping: the (frontier, target) pairs already attempted from a specific
     // vantage point.
     std::unordered_set<FrontierTargetPair, FrontierTargetPairHash> tried_pairs{};
@@ -441,6 +464,8 @@ struct MappingAlgorithmImpl::Impl {
                                         const common_types::LidarScanResult* latest_scan);
 
 private:
+    [[nodiscard]] common_types::MappingStepCommand calibrationStep(const Context& ctx,
+                                                                    const common_types::DroneState& state);
     void resolvePendingScan(const Context& ctx, const common_types::DroneState& state);
     common_types::MappingStepCommand sweepStep(const Context& ctx, const common_types::DroneState& state);
     common_types::MappingStepCommand frontierStep(const Context& ctx, const common_types::DroneState& state);
@@ -504,6 +529,10 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::nextStep(const Cont
     // latest_scan is offered only for convenience and is not required for correct behavior.
     (void)latest_scan;
 
+    if (calibration_state != CalibrationState::Done) {
+        return calibrationStep(ctx, state);
+    }
+
     resolvePendingScan(ctx, state);
 
     if (!pending_moves.empty()) {
@@ -533,6 +562,53 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::popPendingMove() {
     return result;
 }
 
+// Two-step rotation-sign calibration, run once before any Sweep/Frontier movement:
+//   1. Probe with a fixed, small Rotate Left and remember the pre-rotation heading H0.
+//   2. On the next call, compare the new heading to H0 using the shortest signed difference. A
+//      positive measured change means this environment's Left is positive; negative means it is
+//      reversed. A ~zero change is inconclusive -- retry rather than silently guessing. Once
+//      determined, rotate back to H0 using that same detected convention (based on the actually
+//      measured change, not merely the originally requested probe angle) and only then hand off
+//      to the normal algorithm.
+common_types::MappingStepCommand MappingAlgorithmImpl::Impl::calibrationStep(const Context& ctx,
+                                                                              const common_types::DroneState& state) {
+    const double current_heading_deg = numDeg(state.heading.horizontal);
+    const double probe_angle_deg = std::min(kCalibrationProbeAngleDeg, numDeg(ctx.drone.max_rotate));
+
+    if (calibration_state == CalibrationState::NotStarted) {
+        calibration_start_heading_deg = current_heading_deg;
+        calibration_state = CalibrationState::AwaitingMeasurement;
+
+        common_types::MovementCommand cmd;
+        cmd.type = common_types::MovementCommandType::Rotate;
+        cmd.rotation = common_types::RotationDirection::Left;
+        cmd.angle = probe_angle_deg * horizontal_angle[deg];
+        return movementOnlyCommand(cmd);
+    }
+
+    const double measured_diff_deg = normalizeDeg(current_heading_deg - calibration_start_heading_deg);
+    if (std::fabs(measured_diff_deg) < kCalibrationZeroToleranceDeg) {
+        // Inconclusive: retry the same probe instead of guessing the convention.
+        common_types::MovementCommand cmd;
+        cmd.type = common_types::MovementCommandType::Rotate;
+        cmd.rotation = common_types::RotationDirection::Left;
+        cmd.angle = probe_angle_deg * horizontal_angle[deg];
+        return movementOnlyCommand(cmd);
+    }
+
+    left_is_positive = measured_diff_deg > 0.0;
+    calibration_state = CalibrationState::Done;
+
+    // The measured change is normally just the small probe angle, but an unusual retry could in
+    // principle make it larger than one command's worth of rotation -- chunk the return-to-H0
+    // rotation the same way any other planner-issued rotation is chunked, rather than risking a
+    // single oversized Rotate. Queued via pending_moves so no Advance/Elevate/Scan can be issued
+    // (nextStep() always drains pending_moves before dispatching to Sweep/Frontier) until every
+    // recovery chunk has been returned.
+    pushChunkedRotate(pending_moves, -measured_diff_deg, numDeg(ctx.drone.max_rotate), left_is_positive);
+    return popPendingMove();
+}
+
 void MappingAlgorithmImpl::Impl::resolvePendingScan(const Context& ctx, const common_types::DroneState& state) {
     if (!pending_scan_target) {
         return;
@@ -559,7 +635,8 @@ void MappingAlgorithmImpl::Impl::resolvePendingScan(const Context& ctx, const co
                 }
                 if (path_to_seed) {
                     if (!path_to_seed->empty()) {
-                        const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, *path_to_seed);
+                        const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, *path_to_seed,
+                                                                      left_is_positive);
                         pending_moves = plan.commands;
                     }
                     phase = Phase::Sweep;
@@ -624,7 +701,7 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::commitSweepPath(con
                                                                               const common_types::DroneState& state,
                                                                               const VoxelIndex& cur,
                                                                               const std::vector<VoxelIndex>& path) {
-    const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, path);
+    const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, path, left_is_positive);
     pending_moves = plan.commands;
     for (const VoxelIndex& voxel : path) {
         swept_voxels.insert(voxel);
@@ -658,7 +735,7 @@ std::optional<common_types::MappingStepCommand> MappingAlgorithmImpl::Impl::tryC
 
     const std::vector<VoxelIndex> batch = extendSweepBatch(ctx, candidate, offset, config);
     const VoxelIndex batch_tail = batch.back();
-    const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, batch);
+    const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, batch, left_is_positive);
     pending_moves = plan.commands;
     for (const VoxelIndex& voxel : batch) {
         swept_voxels.insert(voxel);
@@ -974,7 +1051,7 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::frontierStep(const 
         return scanCommand(ctx, state, bfs.target, cur);
     }
 
-    const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, bfs.path);
+    const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, bfs.path, left_is_positive);
     pending_moves = plan.commands;
     if (pending_moves.empty()) {
         // Prevent an infinite stall if a non-trivial path yields no movement.
