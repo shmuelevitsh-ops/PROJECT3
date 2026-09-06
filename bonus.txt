@@ -12,7 +12,7 @@ The main implementation is in:
 
 1. Faulty algorithm movement would result in getting out of bounds
    Handling:
-   DroneControl checks the requested position-changing movement against the map bounds.
+   DroneControl checks the requested position-changing movement against the mission bounds.
    If no legal non-zero part of the requested movement can be executed, the movement is
    ignored and is not passed to IDroneMovement. The rest of the step, such as a requested
    scan, may still continue.

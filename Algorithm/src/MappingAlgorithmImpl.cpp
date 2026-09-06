@@ -87,7 +87,6 @@ enum class Phase { Sweep, Frontier, Done };
 
 // Groups the algorithm's read-only dependencies.
 struct Context {
-    const common_types::MissionConfigData& mission;
     const common_types::LidarConfigData& lidar;
     const common_types::DroneConfigData& drone;
     const IMap3D& map;
@@ -407,9 +406,8 @@ struct MappingAlgorithmImpl::Impl {
     Phase phase = Phase::Sweep;
     std::deque<common_types::MovementCommand> pending_moves{};
 
-    // Frontier bookkeeping: unresolved targets plus the frontier/target pairs
-    // already attempted from a specific vantage point.
-    std::unordered_set<VoxelIndex, VoxelIndexHash> unresolved_targets{};
+    // Frontier bookkeeping: the (frontier, target) pairs already attempted from a specific
+    // vantage point.
     std::unordered_set<FrontierTargetPair, FrontierTargetPairHash> tried_pairs{};
 
     // Voxels the drone has physically traversed as part of a Local Sweep (never Frontier
@@ -417,7 +415,7 @@ struct MappingAlgorithmImpl::Impl {
     std::unordered_set<VoxelIndex, VoxelIndexHash> swept_voxels{};
 
     // Local Sweep lawnmower state: bounds are fixed for the whole mission (computed once);
-    // dir_x/repeat-scan-count reset whenever a new Local Sweep begins.
+    // dir_x resets whenever a new Local Sweep begins.
     bool sweep_initialized = false;
     int sweep_dir_x = 1;
     long sweep_min_x = 0, sweep_max_x = 0;
@@ -431,7 +429,6 @@ struct MappingAlgorithmImpl::Impl {
     // Tracks the scan most recently requested, so the *next* call can tell whether it resolved.
     std::optional<VoxelIndex> pending_scan_target{};
     std::optional<VoxelIndex> pending_scan_frontier{};
-    bool pending_scan_in_frontier_phase = false;
 
     // Deferred scan attached to the final command of the current movement queue.
     std::optional<Orientation> pending_moves_scan_orientation{};
@@ -477,7 +474,7 @@ private:
 
     // Extends an in-lane Sweep batch across consecutive safe Empty cells.
     [[nodiscard]] std::vector<VoxelIndex> extendSweepBatch(const Context& ctx, const VoxelIndex& candidate,
-                                                            long dx, long dy, long dz, const Position3D& offset,
+                                                            const Position3D& offset,
                                                             const common_types::MapConfig& config);
     // Schedules a scan on the final command of a Sweep movement batch.
     void preparePipelinedSweepScan(const Context& ctx, const common_types::DroneState& state,
@@ -529,7 +526,6 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::popPendingMove() {
         result.scan_orientation = pending_moves_scan_orientation;
         pending_scan_target = pending_moves_scan_target;
         pending_scan_frontier = pending_moves_scan_frontier;
-        pending_scan_in_frontier_phase = pending_moves_scan_frontier.has_value();
         pending_moves_scan_orientation.reset();
         pending_moves_scan_target.reset();
         pending_moves_scan_frontier.reset();
@@ -546,9 +542,8 @@ void MappingAlgorithmImpl::Impl::resolvePendingScan(const Context& ctx, const co
     const common_types::VoxelOccupancy occ = ctx.map.atVoxel(toWorldCenter(target, config));
     const bool resolved = !isTargetOccupancy(occ);
 
-    if (pending_scan_in_frontier_phase && pending_scan_frontier) {
+    if (pending_scan_frontier) {
         if (resolved) {
-            unresolved_targets.erase(target);
             const VoxelIndex cur = toVoxelIndex(state.position, config);
             const Position3D offset = intraVoxelOffset(ctx, state);
             // The scan exposed new reachable free space: seed the next Local Sweep from it
@@ -578,7 +573,6 @@ void MappingAlgorithmImpl::Impl::resolvePendingScan(const Context& ctx, const co
 
     pending_scan_target.reset();
     pending_scan_frontier.reset();
-    pending_scan_in_frontier_phase = false;
 }
 
 common_types::MappingStepCommand MappingAlgorithmImpl::Impl::scanCommand(const Context& ctx,
@@ -587,7 +581,6 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::scanCommand(const C
                                                                     const std::optional<VoxelIndex>& frontier) {
     pending_scan_target = target;
     pending_scan_frontier = frontier;
-    pending_scan_in_frontier_phase = frontier.has_value();
 
     const Position3D target_center = toWorldCenter(target, ctx.map.getMapConfig());
     common_types::MappingStepCommand result;
@@ -663,7 +656,7 @@ std::optional<common_types::MappingStepCommand> MappingAlgorithmImpl::Impl::tryC
             break;
     }
 
-    const std::vector<VoxelIndex> batch = extendSweepBatch(ctx, candidate, sweep_dir_x, 0, 0, offset, config);
+    const std::vector<VoxelIndex> batch = extendSweepBatch(ctx, candidate, offset, config);
     const VoxelIndex batch_tail = batch.back();
     const MovementPlan plan = buildMovementQueue(ctx, state.heading, cur, batch);
     pending_moves = plan.commands;
@@ -774,26 +767,24 @@ common_types::MappingStepCommand MappingAlgorithmImpl::Impl::sweepStep(const Con
 
 // Extends a pure in-lane Sweep batch across consecutive safe Empty cells.
 std::vector<VoxelIndex> MappingAlgorithmImpl::Impl::extendSweepBatch(const Context& ctx,
-                                                                     const VoxelIndex& candidate, long dx, long dy,
-                                                                     long dz, const Position3D& offset,
-                                                                     const common_types::MapConfig& config) {
+                                                                      const VoxelIndex& candidate,
+                                                                      const Position3D& offset,
+                                                                      const common_types::MapConfig& config) {
     std::vector<VoxelIndex> batch{candidate};
     VoxelIndex batch_tail = candidate;
-    if (dy == 0 && dz == 0 && dx == sweep_dir_x) {
-        while (true) {
-            const long peek_x = batch_tail.ix + sweep_dir_x;
-            if (peek_x < sweep_min_x || peek_x > sweep_max_x) {
-                break; // Stop before a lane pivot.
-            }
-            const VoxelIndex peek{peek_x, batch_tail.iy, batch_tail.iz};
-            if (swept_voxels.count(peek) != 0 ||
-                ctx.map.atVoxel(toWorldCenter(peek, config)) != common_types::VoxelOccupancy::Empty ||
-                !isSafeVoxel(ctx, peek, offset)) {
-                break;
-            }
-            batch.push_back(peek);
-            batch_tail = peek;
+    while (true) {
+        const long peek_x = batch_tail.ix + sweep_dir_x;
+        if (peek_x < sweep_min_x || peek_x > sweep_max_x) {
+            break; // Stop before a lane pivot.
         }
+        const VoxelIndex peek{peek_x, batch_tail.iy, batch_tail.iz};
+        if (swept_voxels.count(peek) != 0 ||
+            ctx.map.atVoxel(toWorldCenter(peek, config)) != common_types::VoxelOccupancy::Empty ||
+            !isSafeVoxel(ctx, peek, offset)) {
+            break;
+        }
+        batch.push_back(peek);
+        batch_tail = peek;
     }
     return batch;
 }
@@ -840,7 +831,6 @@ std::optional<VoxelIndex> MappingAlgorithmImpl::Impl::findUntriedTargetNear(cons
                     continue;
                 }
 
-                unresolved_targets.insert(candidate);
                 if (!chosen && tried_pairs.count(FrontierTargetPair{s, candidate}) == 0 &&
                     hasLineOfSight(ctx, s, candidate)) {
                     chosen = candidate;
@@ -1023,7 +1013,7 @@ common_types::MappingStepCommand MappingAlgorithmImpl::nextStep(const common_typ
     if (!impl_) {
         impl_ = std::make_unique<Impl>();
     }
-    const Context ctx{mission_config_, lidar_config_, drone_config_, output_map_};
+    const Context ctx{lidar_config_, drone_config_, output_map_};
     return impl_->nextStep(ctx, state, latest_scan);
 }
 

@@ -224,13 +224,11 @@ TEST(Stage3Verify, CompetitionFixedComponentLoadFailurePropagates) {
     EXPECT_TRUE(std::filesystem::is_empty(results_dir.path()));
 }
 
-TEST(Stage3Verify, ComparativeRunWritePhaseFailureIsolatesOneComponent) {
+TEST(Stage3Verify, ComparativeRunWriteFailureBecomesErrorRun) {
     ScratchDir mc_dir("stage3_verify_mc_blocked");
     std::filesystem::copy_file(kMissionControlFile, mc_dir.path() / "mgr_ok.so");
     std::filesystem::copy_file(kMissionControlFile, mc_dir.path() / "mgr_blocked.so");
 
-    // A dedicated copy: see the comment in ComparativeMultiComponentGarbageNestingAndOrdering on
-    // why the fixed algorithm .so can't be the same already-loaded path an earlier test used.
     ScratchDir algo_dir("stage3_verify_algo_blocked");
     const std::filesystem::path algorithm_copy = algo_dir.path() / kAlgorithmFile.filename();
     std::filesystem::copy_file(kAlgorithmFile, algorithm_copy);
@@ -239,32 +237,48 @@ TEST(Stage3Verify, ComparativeRunWritePhaseFailureIsolatesOneComponent) {
     const std::filesystem::path compose_path = writeMinimalComposition(compose_dir.path());
 
     ScratchDir results_dir("stage3_verify_results_blocked");
-    // Pre-create the blocked component's own map-output directory *as a regular file*, so
-    // SimulationManager's internal create_directories(leaf_dir) fails for that component only.
+
+    // Block only this component's run-output directory.
     { std::ofstream blocker(results_dir.path() / "mgr_blocked"); }
 
     const simulator::ComparativeOptions options =
         parseComparative({"-comparative", "simulation=" + compose_path.string(),
-                          "mission_control_folder=" + mc_dir.path().string(), "algorithm=" + algorithm_copy.string()});
+                          "mission_control_folder=" + mc_dir.path().string(),
+                          "algorithm=" + algorithm_copy.string()});
 
     CerrCapture capture;
     const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
     const std::string log = capture.str();
 
-    EXPECT_EQ(ran, 1u);
-    EXPECT_TRUE(std::filesystem::exists(results_dir.path() / "simulation_output_mgr_ok.yaml"));
-    EXPECT_FALSE(std::filesystem::exists(results_dir.path() / "simulation_output_mgr_blocked.yaml"));
-    EXPECT_NE(log.find("component mgr_blocked.so failed during simulation/output:"), std::string::npos);
+    EXPECT_EQ(ran, 2u);
+    EXPECT_TRUE(std::filesystem::exists(
+        results_dir.path() / "simulation_output_mgr_ok.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(
+        results_dir.path() / "simulation_output_mgr_blocked.yaml"));
 
-    const YAML::Node root = YAML::LoadFile((results_dir.path() / "comparative_report.yaml").string());
+    EXPECT_NE(
+        log.find("SimulationManager::run: failed to create output directory, scoring -1:"),
+        std::string::npos);
+
+    const YAML::Node blocked =
+        YAML::LoadFile(
+            (results_dir.path() / "simulation_output_mgr_blocked.yaml").string())
+            ["score_report"];
+
+    EXPECT_EQ(blocked["summary"]["error_runs"].as<int>(), 1);
+
+    const YAML::Node root =
+        YAML::LoadFile((results_dir.path() / "comparative_report.yaml").string());
     const YAML::Node comparative = root["comparative_report"];
 
     std::vector<std::string> errors;
     for (const YAML::Node& entry : comparative["errors"]) {
         errors.push_back(entry.as<std::string>());
     }
-    EXPECT_NE(std::find(errors.begin(), errors.end(), "mgr_blocked.so"), errors.end());
-    EXPECT_EQ(std::find(errors.begin(), errors.end(), "mgr_ok.so"), errors.end());
+
+    EXPECT_EQ(
+        std::find(errors.begin(), errors.end(), "mgr_blocked.so"),
+        errors.end());
 
     std::vector<std::string> summarized;
     for (const YAML::Node& group : comparative["results_summary"]) {
@@ -272,8 +286,13 @@ TEST(Stage3Verify, ComparativeRunWritePhaseFailureIsolatesOneComponent) {
             summarized.push_back(name.as<std::string>());
         }
     }
-    EXPECT_NE(std::find(summarized.begin(), summarized.end(), "mgr_ok.so"), summarized.end());
-    EXPECT_EQ(std::find(summarized.begin(), summarized.end(), "mgr_blocked.so"), summarized.end());
+
+    EXPECT_NE(
+        std::find(summarized.begin(), summarized.end(), "mgr_ok.so"),
+        summarized.end());
+    EXPECT_NE(
+        std::find(summarized.begin(), summarized.end(), "mgr_blocked.so"),
+        summarized.end());
 }
 
 TEST(Stage3Verify, CompetitionMultiComponentAndGarbage) {

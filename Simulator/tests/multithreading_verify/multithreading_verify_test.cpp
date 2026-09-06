@@ -371,7 +371,7 @@ TEST(MultithreadingVerify, FewerComponentsThanRequestedThreadsDoesNotCrashOrHang
     EXPECT_TRUE(std::filesystem::exists(results_dir.path() / "simulation_output_only_b.yaml"));
 }
 
-TEST(MultithreadingVerify, RunWritePhaseFailureIsolatesOneComponentUnderConcurrency) {
+TEST(MultithreadingVerify, RunWriteFailureBecomesErrorRunUnderConcurrency) {
     ScratchDir mc_dir("mt_verify_mc_blocked");
     std::filesystem::copy_file(kMissionControlFile, mc_dir.path() / "mgr_ok_1.so");
     std::filesystem::copy_file(kMissionControlFile, mc_dir.path() / "mgr_ok_2.so");
@@ -386,32 +386,50 @@ TEST(MultithreadingVerify, RunWritePhaseFailureIsolatesOneComponentUnderConcurre
     const std::filesystem::path compose_path = writeMinimalComposition(compose_dir.path());
 
     ScratchDir results_dir("mt_verify_results_blocked");
-    // Pre-create the blocked component's own map-output directory *as a regular file*, so
-    // SimulationManager's internal create_directories(leaf_dir) fails for that component only.
+
+    // Block only this component's run-output directory.
     { std::ofstream blocker(results_dir.path() / "mgr_blocked"); }
 
     const simulator::ComparativeOptions options =
         parseComparative({"-comparative", "simulation=" + compose_path.string(),
                           "mission_control_folder=" + mc_dir.path().string(),
-                          "algorithm=" + algorithm_copy.string(), "num_threads=4"});
+                          "algorithm=" + algorithm_copy.string(),
+                          "num_threads=4"});
 
     CerrCapture capture;
     const std::size_t ran = simulator::Simulator(options, results_dir.path()).run();
     const std::string log = capture.str();
 
-    EXPECT_EQ(ran, 3u);
-    EXPECT_TRUE(std::filesystem::exists(results_dir.path() / "simulation_output_mgr_ok_1.yaml"));
-    EXPECT_TRUE(std::filesystem::exists(results_dir.path() / "simulation_output_mgr_ok_2.yaml"));
-    EXPECT_TRUE(std::filesystem::exists(results_dir.path() / "simulation_output_mgr_ok_3.yaml"));
-    EXPECT_FALSE(std::filesystem::exists(results_dir.path() / "simulation_output_mgr_blocked.yaml"));
-    EXPECT_NE(log.find("component mgr_blocked.so failed during simulation/output:"), std::string::npos);
+    EXPECT_EQ(ran, 4u);
+
+    EXPECT_TRUE(std::filesystem::exists(
+        results_dir.path() / "simulation_output_mgr_ok_1.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(
+        results_dir.path() / "simulation_output_mgr_ok_2.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(
+        results_dir.path() / "simulation_output_mgr_ok_3.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(
+        results_dir.path() / "simulation_output_mgr_blocked.yaml"));
+
+    EXPECT_NE(
+        log.find("SimulationManager::run: failed to create output directory, scoring -1:"),
+        std::string::npos);
+
+    const YAML::Node blocked =
+        YAML::LoadFile(
+            (results_dir.path() / "simulation_output_mgr_blocked.yaml").string())
+            ["score_report"];
+
+    EXPECT_EQ(blocked["summary"]["error_runs"].as<int>(), 1);
 
     const YAML::Node report =
-        YAML::LoadFile((results_dir.path() / "comparative_report.yaml").string())["comparative_report"];
+        YAML::LoadFile(
+            (results_dir.path() / "comparative_report.yaml").string())
+            ["comparative_report"];
 
     const std::vector<std::string> errors = extractErrors(report);
-    EXPECT_NE(std::find(errors.begin(), errors.end(), "mgr_blocked.so"), errors.end());
-    EXPECT_EQ(errors.size(), 1u);
+
+    EXPECT_TRUE(errors.empty());
 
     std::vector<std::string> summarized;
     for (const ResultsSummaryGroup& group : extractResultsSummary(report)) {
@@ -419,10 +437,19 @@ TEST(MultithreadingVerify, RunWritePhaseFailureIsolatesOneComponentUnderConcurre
             summarized.push_back(name);
         }
     }
-    EXPECT_NE(std::find(summarized.begin(), summarized.end(), "mgr_ok_1.so"), summarized.end());
-    EXPECT_NE(std::find(summarized.begin(), summarized.end(), "mgr_ok_2.so"), summarized.end());
-    EXPECT_NE(std::find(summarized.begin(), summarized.end(), "mgr_ok_3.so"), summarized.end());
-    EXPECT_EQ(std::find(summarized.begin(), summarized.end(), "mgr_blocked.so"), summarized.end());
+
+    EXPECT_NE(
+        std::find(summarized.begin(), summarized.end(), "mgr_ok_1.so"),
+        summarized.end());
+    EXPECT_NE(
+        std::find(summarized.begin(), summarized.end(), "mgr_ok_2.so"),
+        summarized.end());
+    EXPECT_NE(
+        std::find(summarized.begin(), summarized.end(), "mgr_ok_3.so"),
+        summarized.end());
+    EXPECT_NE(
+        std::find(summarized.begin(), summarized.end(), "mgr_blocked.so"),
+        summarized.end());
 }
 
 namespace {
